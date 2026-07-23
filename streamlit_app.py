@@ -50,13 +50,22 @@ def csv_safe(value):
 
 
 def goto(page_name, brand_code=None):
+    """
+    Switch page (and optionally client) from a button click.
+
+    Must be called via a button's on_click= callback, not directly inside
+    the page body — Streamlit forbids writing to session_state for a key
+    that's already bound to a widget rendered earlier in the same run
+    (the sidebar's Page radio, key="nav_page", is drawn before any page
+    body runs). Callbacks execute in a separate phase before the rerun,
+    where this is explicitly allowed.
+    """
     st.session_state["nav_page"] = page_name
     if brand_code is not None:
         clients = store.get_clients()
         match = clients[clients["brand_code"] == brand_code]
         if not match.empty:
             st.session_state["client_selector"] = match.iloc[0]["client_name"]
-    st.rerun()
 
 
 # =============================================================== sidebar
@@ -138,8 +147,8 @@ if page == "Overview":
     cols = st.columns(min(4, len(clients)) or 1)
     for i, (_, c) in enumerate(clients.iterrows()):
         with cols[i % len(cols)]:
-            if st.button(f"Open {c['client_name']} →", key=f"open_{c['brand_code']}", use_container_width=True):
-                goto("Dashboard", c["brand_code"])
+            st.button(f"Open {c['client_name']} →", key=f"open_{c['brand_code']}", use_container_width=True,
+                      on_click=goto, args=("Dashboard", c["brand_code"]))
     st.stop()
 
 
@@ -609,7 +618,7 @@ with st.expander("🧪 Mock shipment — see how a planned shipment changes DOI"
 # ---- Main table ----
 if mode == "prime_day":
     display_cols = {
-        "alerts": "", "doi_flag": "", "title": "Title", "sku": "SKU",
+        "alerts": "Alerts", "doi_flag": "Flag", "title": "Title", "sku": "SKU",
         "fulfillable": "Fulfillable", "fulfillable_plus_inbound": "Fulf.+Inbound",
         "daily_avg": "Daily Avg", "pd_multiplier": "PD Mult.", "pd_daily_avg": "PD Daily Avg",
         "pd_doi_event": "PD DOI (event)", "pd_units_to_order": "PD Order Units",
@@ -617,7 +626,7 @@ if mode == "prime_day":
     }
 else:
     display_cols = {
-        "alerts": "", "doi_flag": "", "title": "Title", "sku": "SKU", "asin": "ASIN",
+        "alerts": "Alerts", "doi_flag": "Flag", "title": "Title", "sku": "SKU", "asin": "ASIN",
         "fulfillable": "Fulfillable", "fulfillable_plus_inbound": "Fulf.+Inbound",
         "daily_avg": "Daily Avg", "current_doi": "DOI", "order_by": "Order By",
         "order_status": "Status", "order_units_calc": "Order Units",
