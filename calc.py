@@ -62,11 +62,34 @@ def _action_text(row) -> str:
     return "✓ OK"
 
 
+_DERIVED_COLS = [
+    "inbound_total", "current_doi", "units_needed", "order_units_calc", "order_cases_calc",
+    "days_until_order", "order_by", "order_status", "doi_flag", "aged_181_plus",
+    "ais_qty_total", "d7_avg", "trend", "action",
+]
+_PD_COLS = [
+    "pd_multiplier", "pd_daily_avg", "pd_doi_event", "pd_units_needed",
+    "pd_units_to_order", "pd_cases_to_order", "pd_status",
+]
+
+
+def _ensure_columns(df: pd.DataFrame, cols: list) -> pd.DataFrame:
+    """
+    Add any missing columns as empty. Keeps the schema identical whether a
+    client has 0 or 500 active SKUs, so downstream column selection (e.g.
+    table[list(display_cols)]) never KeyErrors on an empty result.
+    """
+    for c in cols:
+        if c not in df.columns:
+            df[c] = pd.Series(dtype="object")
+    return df
+
+
 def compute_derived(df: pd.DataFrame, target_doi: int, lead_time: int) -> pd.DataFrame:
     """Add DOI, replenishment, order-timing, trend, and action columns (standard mode)."""
     df = df.copy()
     if df.empty:
-        return df
+        return _ensure_columns(df, _DERIVED_COLS)
     df["inbound_total"] = (df["inbound_working"] + df["inbound_shipped"] + df["inbound_receiving"]
                             + df.get("fc_transfer", 0) + df.get("fc_processing", 0))
     df["current_doi"] = df.apply(
@@ -97,7 +120,7 @@ def compute_prime_day(df: pd.DataFrame, pd_settings: dict, target_doi: int, lead
     import json
     df = compute_derived(df, target_doi, lead_time)
     if df.empty:
-        return df
+        return _ensure_columns(df, _PD_COLS)
 
     multiplier = pd_settings["multiplier"]
     sup_lt = pd_settings["supplier_lead_time"]
