@@ -2,7 +2,7 @@
 calc.py — Shared inventory math, used by the dashboard, overview, and digest
 pages so the formulas live in exactly one place (the original plugin had
 this logic duplicated across the AJAX handler, database class, and email
-digest — this consolidates it).
+digest — this consolidates it here).
 """
 
 import math
