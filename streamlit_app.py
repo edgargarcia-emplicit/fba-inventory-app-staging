@@ -91,7 +91,7 @@ def goto(page_name, brand_code=None, prefill_sku=None):
 
 # =============================================================== sidebar
 clients = store.get_clients()
-PAGES = ["Overview", "Dashboard", "Health Report", "Shipments", "Digest Preview", "Clients"]
+PAGES = ["Overview", "Dashboard", "Inventory Report (Beta)", "Health Report", "Shipments", "Digest Preview", "Clients"]
 
 with st.sidebar:
     st.title("📦 FBA Inventory")
@@ -288,6 +288,18 @@ if page == "Digest Preview":
 
     st.divider()
     st.components.v1.html(html, height=900, scrolling=True)
+    st.stop()
+
+
+# =============================================================== INVENTORY REPORT (BETA)
+if page == "Inventory Report (Beta)":
+    st.header(f"🗂️ Inventory Report — {active['client_name']}")
+    st.caption("Same data as the Dashboard, shown in the branded card/table style from the email digest — "
+                "an alternative layout for comparison. Nothing here is editable; use the Dashboard for that.")
+    ships_df = store.get_shipments(brand)
+    section_html = digest.build_client_section(active, inv, settings["target_doi"], settings["lead_time"], ships_df)
+    full_html = digest.wrap_email(date.today().strftime("%A, %B %d, %Y"), "just now", section_html)
+    st.components.v1.html(full_html, height=1400, scrolling=True)
     st.stop()
 
 
@@ -576,37 +588,109 @@ table["note_preview"] = table["sku"].map(
                if (notes_df["sku"] == s).any() else ""))
 table["synced"] = snapshot
 
-# ---- Main table: one wide, dense grid — click a row to open its detail panel below ----
+# ---- Main table: one wide, dense grid, with Mock Units / Future DOI / Note editable inline ----
 if mode == "prime_day":
     display_cols = {
-        "alerts": "Alerts", "doi_flag": "Flag", "trend": "Trend", "title": "Title", "sku": "SKU",
+        "alerts": "Alerts", "doi_flag": "Flag", "trend": "Trend", "trend_vs30": "vs 30d %",
+        "trend_vs90": "vs 90d %", "title": "Title", "sku": "SKU",
         "fulfillable": "Fulfillable", "fulfillable_plus_inbound": "Fulf.+Inbound",
         "daily_avg": "Daily Avg", "pd_multiplier": "PD Mult.", "pd_daily_avg": "PD Daily Avg",
         "pd_doi_event": "PD DOI (event)", "pd_units_to_order": "PD Order Units",
         "pd_cases_to_order": "PD Order Cases", "pd_status": "PD Status",
         "inv_age_91_180": "91-180d", "inv_age_181_270": "181-270d", "aged_181_plus": "181d+",
-        "ais_qty_total": "AIS Units", "note_preview": "Note", "synced": "Synced",
+        "ais_qty_total": "AIS Units", "synced": "Synced",
     }
+    daily_col = "pd_daily_avg"
 else:
     display_cols = {
-        "alerts": "Alerts", "doi_flag": "Flag", "trend": "Trend", "title": "Title", "sku": "SKU", "asin": "ASIN",
+        "alerts": "Alerts", "doi_flag": "Flag", "trend": "Trend", "trend_vs30": "vs 30d %",
+        "trend_vs90": "vs 90d %", "title": "Title", "sku": "SKU", "asin": "ASIN",
         "fulfillable": "Fulfillable", "fulfillable_plus_inbound": "Fulf.+Inbound",
         "units_7day": "7d Units", "units_30day": "30d Units", "units_60day": "60d Units", "units_90day": "90d Units",
         "d7_avg": "7d Avg", "daily_avg": "Daily Avg",
         "current_doi": "DOI", "order_by": "Order By", "order_status": "Status", "action": "Action",
         "order_units_calc": "Order Units", "order_cases_calc": "Order Cases",
         "inv_age_91_180": "91-180d", "inv_age_181_270": "181-270d", "aged_181_plus": "181d+",
-        "ais_qty_total": "AIS Units", "pct_sales_mix": "% Mix", "note_preview": "Note", "synced": "Synced",
+        "ais_qty_total": "AIS Units", "pct_sales_mix": "% Mix", "synced": "Synced",
     }
-view = safe_view(table, display_cols)
-event = st.dataframe(
-    view, use_container_width=True, hide_index=True, height=520,
-    on_select="rerun", selection_mode="single-row", key="main_grid",
-    column_config={"Daily Avg": st.column_config.NumberColumn(format="%.1f"),
-                   "7d Avg": st.column_config.NumberColumn(format="%.1f"),
-                   "% Mix": st.column_config.NumberColumn(format="%.1f%%"),
-                   "Note": st.column_config.TextColumn(width="small")},
+    daily_col = "daily_avg"
+
+edit_df = safe_view(table, display_cols)
+editor_key = f"main_editor_{brand}_{mode}_{show_inactive}_{hash(search)}"
+
+# Mock Units and Note are tracked in our OWN persistent session_state dicts, keyed by SKU,
+# rather than relying on data_editor's own edited_rows diff. That diff is relative to
+# whatever base dataframe we hand the widget each render — if we bake the last edit back in
+# as the new baseline (needed so Future DOI can update), the diff looks like "no change"
+# again on the very next rerun, silently reverting the value. Keeping our own store, synced
+# via on_change the instant an edit happens, avoids that entirely.
+mock_store = st.session_state.setdefault("mock_units_by_sku", {})
+pending_notes = st.session_state.setdefault("pending_notes_by_sku", {})
+
+# Sync any in-progress edit out of the widget's own transient diff into our stable stores,
+# every run. Not using on_change for this: the sync has to happen before we rebuild the base
+# dataframe below anyway, so doing it inline here is simpler and (per direct testing) more
+# reliably triggered than a callback.
+_edited_now = st.session_state.get(editor_key, {}).get("edited_rows", {})
+for _pos_str, _changes in _edited_now.items():
+    _pos = int(_pos_str)
+    if _pos >= len(table):
+        continue
+    _sku_val = table.iloc[_pos]["sku"]
+    if "Mock Units" in _changes:
+        mock_store[_sku_val] = _changes["Mock Units"]
+    if "Note" in _changes:
+        pending_notes[_sku_val] = _changes["Note"]
+
+
+mock_units_col = [mock_store.get(sku, 0) for sku in table["sku"]]
+note_col = [pending_notes.get(sku, orig) for sku, orig in zip(table["sku"], table["note_preview"])]
+
+edit_df.insert(list(edit_df.columns).index("DOI") + 1 if "DOI" in edit_df.columns else len(edit_df.columns),
+               "Mock Units", mock_units_col)
+
+
+def _future_doi(pos):
+    mu = mock_units_col[pos]
+    dv = table.iloc[pos][daily_col] if daily_col in table.columns else 0
+    fi = table.iloc[pos]["fulfillable_plus_inbound"]
+    if mu and dv and dv > 0:
+        return round((fi + mu) / dv)
+    return None
+
+
+edit_df.insert(list(edit_df.columns).index("Mock Units") + 1, "Future DOI",
+               [_future_doi(i) for i in range(len(table))])
+edit_df["Note"] = note_col
+
+result = st.data_editor(
+    edit_df, use_container_width=True, hide_index=True, height=520, key=editor_key,
+    disabled=[c for c in edit_df.columns if c not in ("Mock Units", "Note")],
+    column_config={
+        "Daily Avg": st.column_config.NumberColumn(format="%.1f"),
+        "7d Avg": st.column_config.NumberColumn(format="%.1f"),
+        "% Mix": st.column_config.NumberColumn(format="%.1f%%"),
+        "vs 30d %": st.column_config.NumberColumn(format="%d%%"),
+        "vs 90d %": st.column_config.NumberColumn(format="%d%%"),
+        "Mock Units": st.column_config.NumberColumn(help="Type a hypothetical incoming quantity to see Future DOI update.", min_value=0),
+        "Future DOI": st.column_config.NumberColumn(help="Projected DOI if the Mock Units quantity arrived today.", disabled=True),
+        "Note": st.column_config.TextColumn(width="medium"),
+    },
 )
+
+if st.button("💾 Save note changes"):
+    saved = 0
+    for pos in range(len(table)):
+        sku_val = table.iloc[pos]["sku"]
+        new_note_val = str(pending_notes.get(sku_val, table.iloc[pos]["note_preview"]) or "")
+        original = notes_df.loc[notes_df["sku"] == sku_val, "note"]
+        original_val = str(original.iloc[0]) if len(original) else ""
+        if new_note_val != original_val:
+            store.save_note(brand, sku_val, new_note_val, updated_by="team")
+            pending_notes.pop(sku_val, None)
+            saved += 1
+    st.toast(f"Saved {saved} note(s)." if saved else "No note changes to save.")
+    st.rerun()
 
 # ---- CSV export (formula-injection safe, mode-aware) ----
 export = table.copy()
@@ -617,54 +701,31 @@ mode_label = "primeday_" if mode == "prime_day" else ""
 st.download_button("⬇️ Export CSV", export.to_csv(index=False).encode("utf-8"),
                     file_name=f"{brand}_inventory_{mode_label}{date.today()}.csv", mime="text/csv")
 
-# ---- Selected-row detail panel: DOI history, mock shipment, note — for the row you clicked ----
+# ---- SKU deep-dive: DOI history chart + quick shipment action ----
+# (st.data_editor doesn't support click-to-select like st.dataframe did, so this is a
+# selectbox instead of a row click — everything else above stays inline on the grid.)
 st.divider()
-selected_rows = event.selection.rows if event and event.selection else []
-if not selected_rows:
-    st.caption("👆 Click any row above to see its DOI history, run a mock shipment, or add a note.")
-else:
-    srow = table.iloc[selected_rows[0]]
-    sku = srow["sku"]
-    st.subheader(f"📌 {srow['title']} — `{sku}`")
-
-    d1, d2 = st.columns([1, 2])
-    with d1:
-        st.markdown("**Mock shipment**")
-        mock_units = st.number_input("Hypothetical units", 0, 100000, 0, key=f"mock_{sku}")
-        if mock_units > 0 and srow["daily_avg"] > 0:
-            future = round((srow["fulfillable_plus_inbound"] + mock_units) / srow["daily_avg"])
-            st.success(f"Current DOI {srow['current_doi']}d → future DOI **{future}d** with +{mock_units:,} units")
-        elif mock_units > 0:
-            st.info("No sales velocity for this SKU, so DOI can't be projected.")
-
-        st.markdown("**Note**")
-        existing_note = notes_df.loc[notes_df["sku"] == sku, "note"]
-        current_note = existing_note.iloc[0] if len(existing_note) else ""
-        new_note = st.text_area("Note (empty = delete)", value=current_note, key=f"note_{sku}", label_visibility="collapsed")
-        if st.button("💾 Save note", key=f"savenote_{sku}"):
-            store.save_note(brand, sku, new_note, updated_by="team")
-            st.toast("Note saved.")
-            st.rerun()
-
-        st.markdown("**Quick actions**")
-        st.button("🚚 Log a shipment for this SKU", key=f"shipbtn_{sku}",
-                   on_click=goto, args=("Shipments", brand), kwargs={"prefill_sku": sku})
-
-    with d2:
-        st.markdown("**DOI history**")
-        days = st.radio("Range", [30, 60, 90], horizontal=True, index=2, key=f"range_{sku}")
-        hist = doi_history.get_history_by_sku(brand, sku, days)
-        if hist.empty:
-            st.info("No history yet for this SKU — a snapshot is saved automatically once per day; "
-                     "check back tomorrow to start seeing a trend.")
-        else:
-            chart_df = hist.set_index("snapshot_date")[["doi", "future_doi"]]
-            chart_df.columns = ["Current DOI", "Future DOI"]
-            st.line_chart(chart_df)
-            stats_box = doi_history.sku_stats(hist)
-            if stats_box:
-                sc1, sc2, sc3 = st.columns(3)
-                sc1.metric("Avg DOI", stats_box["avg_doi"])
-                sc2.metric("Min / Max", f"{stats_box['min_doi']} / {stats_box['max_doi']}")
-                trend_val = stats_box["trend"]
-                sc3.metric("Trend", f"{'+' if trend_val >= 0 else ''}{trend_val}d", delta=trend_val)
+st.subheader("🔎 SKU deep-dive")
+dd_sku = st.selectbox("SKU", table["sku"].tolist(), key="deepdive_sku")
+d1, d2 = st.columns([2, 1])
+with d1:
+    days = st.radio("DOI history range", [30, 60, 90], horizontal=True, index=2, key=f"range_{dd_sku}")
+    hist = doi_history.get_history_by_sku(brand, dd_sku, days)
+    if hist.empty:
+        st.info("No history yet for this SKU — a snapshot is saved automatically once per day; "
+                 "check back tomorrow to start seeing a trend.")
+    else:
+        chart_df = hist.set_index("snapshot_date")[["doi", "future_doi"]]
+        chart_df.columns = ["Current DOI", "Future DOI"]
+        st.line_chart(chart_df)
+        stats_box = doi_history.sku_stats(hist)
+        if stats_box:
+            sc1, sc2, sc3 = st.columns(3)
+            sc1.metric("Avg DOI", stats_box["avg_doi"])
+            sc2.metric("Min / Max", f"{stats_box['min_doi']} / {stats_box['max_doi']}")
+            trend_val = stats_box["trend"]
+            sc3.metric("Trend", f"{'+' if trend_val >= 0 else ''}{trend_val}d", delta=trend_val)
+with d2:
+    st.markdown("**Quick actions**")
+    st.button("🚚 Log a shipment for this SKU", key=f"shipbtn_{dd_sku}",
+               on_click=goto, args=("Shipments", brand), kwargs={"prefill_sku": dd_sku})
