@@ -49,9 +49,9 @@ def csv_safe(value):
     return s
 
 
-def goto(page_name, brand_code=None):
+def goto(page_name, brand_code=None, prefill_sku=None):
     """
-    Switch page (and optionally client) from a button click.
+    Switch page (and optionally client / a SKU to prefill) from a button click.
 
     Must be called via a button's on_click= callback, not directly inside
     the page body — Streamlit forbids writing to session_state for a key
@@ -66,11 +66,13 @@ def goto(page_name, brand_code=None):
         match = clients[clients["brand_code"] == brand_code]
         if not match.empty:
             st.session_state["client_selector"] = match.iloc[0]["client_name"]
+    if prefill_sku is not None:
+        st.session_state["prefill_sku"] = prefill_sku
 
 
 # =============================================================== sidebar
 clients = store.get_clients()
-PAGES = ["Overview", "Dashboard", "Health Report", "DOI History", "Shipments", "Digest Preview", "Clients"]
+PAGES = ["Overview", "Dashboard", "Health Report", "Shipments", "Digest Preview", "Clients"]
 
 with st.sidebar:
     st.title("📦 FBA Inventory")
@@ -305,41 +307,6 @@ if page == "Health Report":
     st.stop()
 
 
-# =============================================================== DOI HISTORY
-if page == "DOI History":
-    st.header(f"📈 DOI History — {active['client_name']}")
-    stats = doi_history.get_tracking_stats(brand)
-    if stats["days_tracked"] == 0:
-        st.info("No history yet — visit the Dashboard page at least once to start tracking "
-                 "(a snapshot is saved automatically once per day).")
-        st.stop()
-
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Days tracked", stats["days_tracked"])
-    c2.metric("SKUs tracked", stats["skus_tracked"])
-    c3.metric("Tracking since", stats["first_snapshot"])
-
-    days = st.radio("Range", [30, 60, 90], horizontal=True, index=2)
-    hist = doi_history.get_history_by_client(brand, days)
-    skus = sorted(hist["sku"].unique().tolist())
-    sku = st.selectbox("SKU", skus)
-    sku_hist = hist[hist["sku"] == sku].sort_values("snapshot_date")
-
-    stats_box = doi_history.sku_stats(sku_hist)
-    if stats_box:
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Current DOI", stats_box["last_doi"])
-        c2.metric("Avg DOI", stats_box["avg_doi"])
-        c3.metric("Min / Max", f"{stats_box['min_doi']} / {stats_box['max_doi']}")
-        trend = stats_box["trend"]
-        c4.metric("Trend", f"{'+' if trend >= 0 else ''}{trend}d", delta=trend)
-
-    chart_df = sku_hist.set_index("snapshot_date")[["doi", "future_doi"]]
-    chart_df.columns = ["Current DOI", "Future DOI"]
-    st.line_chart(chart_df)
-    st.stop()
-
-
 # =============================================================== SHIPMENTS
 if page == "Shipments":
     st.header(f"🚚 Shipments — {active['client_name']}")
@@ -377,9 +344,13 @@ if page == "Shipments":
                         st.rerun()
 
         st.subheader("Log a new shipment")
+        prefill = st.session_state.get("prefill_sku")
+        if prefill and "prefill_sku" in st.session_state:
+            del st.session_state["prefill_sku"]
         with st.form("ship_form"):
             sku_options = active_inv["sku"].tolist()
-            sku = st.selectbox("SKU", sku_options)
+            default_idx = sku_options.index(prefill) if prefill in sku_options else 0
+            sku = st.selectbox("SKU", sku_options, index=default_idx)
             c1, c2, c3 = st.columns(3)
             units = c1.number_input("Units", min_value=1, value=100)
             fba_id = c2.text_input("FBA shipment ID", placeholder="FBA15XYZ...")
@@ -479,8 +450,6 @@ if page == "Shipments":
 # =============================================================== DASHBOARD
 st.header(f"{active['client_name']} — Inventory Dashboard")
 snapshot = inv["snapshot_date"].iloc[0] if len(inv) else ""
-if snapshot:
-    st.caption(f"Sheet snapshot date: {snapshot}")
 
 active_inv = calc.active_only(inv)
 
@@ -496,24 +465,7 @@ if (target_doi, lead_time) != (settings["target_doi"], settings["lead_time"]):
 
 derived = calc.compute_derived(active_inv, target_doi, lead_time)
 doi_history.snapshot_today(brand, derived)
-
-# ---- Notifications banner ----
 health_counts = health.get_notification_counts(brand)
-overdue_n = int((derived["days_until_order"] < 0).sum()) if not derived.empty else 0
-aged = calc.aged_summary(derived)
-aged_fee_n = int((aged["ais_qty_total"] > 0).sum()) if not aged.empty else 0
-stranded_n = sum(1 for v in health_counts.values() if "stranded" in v)
-unful_n = sum(1 for v in health_counts.values() if "unfulfillable" in v)
-attention_total = overdue_n + aged_fee_n + stranded_n + unful_n
-if attention_total > 0:
-    with st.container(border=True):
-        st.markdown(f"🔔 **{attention_total} item(s) need attention**")
-        parts = []
-        if overdue_n: parts.append(f"{overdue_n} overdue reorder(s)")
-        if aged_fee_n: parts.append(f"{aged_fee_n} SKU(s) incurring aged-inventory fees")
-        if stranded_n: parts.append(f"{stranded_n} stranded SKU(s)")
-        if unful_n: parts.append(f"{unful_n} unfulfillable SKU(s)")
-        st.caption(" · ".join(parts) + "  (see Health Report / DOI History pages for detail)")
 
 # ---- Prime Day settings ----
 pd_settings = store.get_prime_day(brand)
@@ -549,37 +501,29 @@ if mode == "prime_day":
 # ---- KPI cards ----
 in_stock = (derived["fulfillable"] > 0).sum() if not derived.empty else 0
 total_active = len(derived)
-k1, k2, k3, k4, k5 = st.columns(5)
+aged_n = int((derived["ais_qty_total"] > 0).sum()) if not derived.empty and "ais_qty_total" in derived else 0
+trending_n = int((derived["trend"] != "").sum()) if not derived.empty and "trend" in derived else 0
+stranded_n = sum(1 for v in health_counts.values() if "stranded" in v)
+unful_n = sum(1 for v in health_counts.values() if "unfulfillable" in v)
+
+k1, k2, k3, k4, k5, k6 = st.columns(6)
 k1.metric("Active SKUs", total_active)
 k2.metric("In-stock rate", f"{(in_stock / total_active * 100):.1f}%" if total_active else "—")
 if mode == "prime_day":
-    k3.metric("Need Prime Day order", int((derived["pd_units_to_order"] > 0).sum()) if not derived.empty else 0)
+    k3.metric("Need PD order", int((derived["pd_units_to_order"] > 0).sum()) if not derived.empty else 0)
     k4.metric("Too late for FBA", int(derived["pd_status"].str.contains("TOO LATE").sum()) if not derived.empty else 0)
 else:
     k3.metric("Below target DOI", int((derived["current_doi"] < target_doi).sum()) if not derived.empty else 0)
     k4.metric("Need reorder now", int((derived["order_units_calc"] > 0).sum()) if not derived.empty else 0)
-k5.metric("Daily units (all SKUs)", f"{derived['daily_avg'].sum():.0f}" if not derived.empty else "0")
+k5.metric("Aged SKUs", aged_n)
+k6.metric("Trending SKUs", trending_n)
+if stranded_n or unful_n:
+    st.caption(f"🟥 {stranded_n} stranded · 🟧 {unful_n} unfulfillable — flagged in the Alerts column below, "
+                f"full detail on the Health Report page.")
+if snapshot:
+    st.caption(f"Sheet snapshot date: {snapshot}")
 
 st.divider()
-
-# ---- Aged inventory panel ----
-if not aged.empty:
-    with st.expander(f"⚠️ Aged Inventory Alerts ({len(aged)} SKUs)"):
-        show_cols = ["title", "sku", "inv_age_91_180", "inv_age_181_270", "inv_age_271_365",
-                     "inv_age_365_plus", "ais_qty_total"]
-        st.dataframe(aged[show_cols].rename(columns={
-            "title": "Title", "sku": "SKU", "inv_age_91_180": "91-180d", "inv_age_181_270": "181-270d",
-            "inv_age_271_365": "271-365d", "inv_age_365_plus": "365d+", "ais_qty_total": "AIS units",
-        }), use_container_width=True, hide_index=True)
-
-# ---- Trending SKUs ----
-trending = calc.trending_skus(active_inv)
-if not trending.empty:
-    with st.expander(f"📈 Trending SKUs ({len(trending)})"):
-        st.dataframe(trending[["title", "sku", "flag", "d7", "d30", "vs30_pct", "vs90_pct"]].rename(columns={
-            "title": "Title", "sku": "SKU", "flag": "Trend", "d7": "7d daily", "d30": "30d daily",
-            "vs30_pct": "vs 30d %", "vs90_pct": "vs 90d %",
-        }), use_container_width=True, hide_index=True)
 
 # ---- Filters ----
 f1, f2 = st.columns([3, 1])
@@ -595,47 +539,50 @@ if search:
             | table["asin"].str.lower().str.contains(q, na=False)
             | table["sku"].str.lower().str.contains(q, na=False))
     table = table[mask]
+table = table.reset_index(drop=True)
 
-# ---- Health badges ----
+# ---- Health badges + note preview (everything inline, no separate panels) ----
 table["alerts"] = table["sku"].map(lambda s: (
     ("🟥" if health_counts.get(s, {}).get("stranded") else "")
     + ("🟧" if health_counts.get(s, {}).get("unfulfillable") else "")
 ))
+notes_df = store.get_notes(brand)
+table["note_preview"] = table["sku"].map(
+    lambda s: (notes_df.loc[notes_df["sku"] == s, "note"].iloc[0]
+               if (notes_df["sku"] == s).any() else ""))
+table["synced"] = snapshot
 
-# ---- Mock shipment simulator ----
-with st.expander("🧪 Mock shipment — see how a planned shipment changes DOI"):
-    m1, m2 = st.columns(2)
-    mock_sku = m1.selectbox("SKU", table["sku"].tolist(), key="mock_sku")
-    mock_units = m2.number_input("Hypothetical units", 0, 100000, 0, key="mock_units")
-    if mock_units > 0:
-        row = table[table["sku"] == mock_sku].iloc[0]
-        if row["daily_avg"] > 0:
-            future = round((row["fulfillable_plus_inbound"] + mock_units) / row["daily_avg"])
-            st.success(f"**{mock_sku}** — current DOI {row['current_doi']}d → future DOI **{future}d** with +{mock_units:,} units")
-        else:
-            st.info("This SKU has no sales velocity, so DOI can't be calculated.")
-
-# ---- Main table ----
+# ---- Main table: one wide, dense grid — click a row to open its detail panel below ----
 if mode == "prime_day":
     display_cols = {
-        "alerts": "Alerts", "doi_flag": "Flag", "title": "Title", "sku": "SKU",
+        "alerts": "Alerts", "doi_flag": "Flag", "trend": "Trend", "title": "Title", "sku": "SKU",
         "fulfillable": "Fulfillable", "fulfillable_plus_inbound": "Fulf.+Inbound",
         "daily_avg": "Daily Avg", "pd_multiplier": "PD Mult.", "pd_daily_avg": "PD Daily Avg",
         "pd_doi_event": "PD DOI (event)", "pd_units_to_order": "PD Order Units",
         "pd_cases_to_order": "PD Order Cases", "pd_status": "PD Status",
+        "inv_age_91_180": "91-180d", "inv_age_181_270": "181-270d", "aged_181_plus": "181d+",
+        "ais_qty_total": "AIS Units", "note_preview": "Note", "synced": "Synced",
     }
 else:
     display_cols = {
-        "alerts": "Alerts", "doi_flag": "Flag", "title": "Title", "sku": "SKU", "asin": "ASIN",
+        "alerts": "Alerts", "doi_flag": "Flag", "trend": "Trend", "title": "Title", "sku": "SKU", "asin": "ASIN",
         "fulfillable": "Fulfillable", "fulfillable_plus_inbound": "Fulf.+Inbound",
-        "daily_avg": "Daily Avg", "current_doi": "DOI", "order_by": "Order By",
-        "order_status": "Status", "order_units_calc": "Order Units",
-        "order_cases_calc": "Order Cases", "pct_sales_mix": "% Mix",
+        "units_7day": "7d Units", "units_30day": "30d Units", "units_60day": "60d Units", "units_90day": "90d Units",
+        "d7_avg": "7d Avg", "daily_avg": "Daily Avg",
+        "current_doi": "DOI", "order_by": "Order By", "order_status": "Status", "action": "Action",
+        "order_units_calc": "Order Units", "order_cases_calc": "Order Cases",
+        "inv_age_91_180": "91-180d", "inv_age_181_270": "181-270d", "aged_181_plus": "181d+",
+        "ais_qty_total": "AIS Units", "pct_sales_mix": "% Mix", "note_preview": "Note", "synced": "Synced",
     }
 view = table[list(display_cols)].rename(columns=display_cols)
-st.dataframe(view, use_container_width=True, hide_index=True, height=520,
-             column_config={"Daily Avg": st.column_config.NumberColumn(format="%.1f"),
-                            "% Mix": st.column_config.NumberColumn(format="%.1f%%")})
+event = st.dataframe(
+    view, use_container_width=True, hide_index=True, height=520,
+    on_select="rerun", selection_mode="single-row", key="main_grid",
+    column_config={"Daily Avg": st.column_config.NumberColumn(format="%.1f"),
+                   "7d Avg": st.column_config.NumberColumn(format="%.1f"),
+                   "% Mix": st.column_config.NumberColumn(format="%.1f%%"),
+                   "Note": st.column_config.TextColumn(width="small")},
+)
 
 # ---- CSV export (formula-injection safe, mode-aware) ----
 export = table.copy()
@@ -646,18 +593,54 @@ mode_label = "primeday_" if mode == "prime_day" else ""
 st.download_button("⬇️ Export CSV", export.to_csv(index=False).encode("utf-8"),
                     file_name=f"{brand}_inventory_{mode_label}{date.today()}.csv", mime="text/csv")
 
-# ---- SKU notes ----
+# ---- Selected-row detail panel: DOI history, mock shipment, note — for the row you clicked ----
 st.divider()
-st.subheader("📝 SKU notes")
-notes = store.get_notes(brand)
-n1, n2 = st.columns([1, 2])
-note_sku = n1.selectbox("SKU", table["sku"].tolist(), key="note_sku")
-existing = notes[notes["sku"] == note_sku]
-current_note = existing.iloc[0]["note"] if not existing.empty else ""
-new_note = n2.text_area("Note (empty = delete)", value=current_note, key=f"note_{note_sku}")
-if st.button("Save note"):
-    store.save_note(brand, note_sku, new_note, updated_by="team")
-    st.toast("Note saved.")
-    st.rerun()
-if not notes.empty:
-    st.dataframe(notes[["sku", "note", "updated_by", "updated_at"]], use_container_width=True, hide_index=True)
+selected_rows = event.selection.rows if event and event.selection else []
+if not selected_rows:
+    st.caption("👆 Click any row above to see its DOI history, run a mock shipment, or add a note.")
+else:
+    srow = table.iloc[selected_rows[0]]
+    sku = srow["sku"]
+    st.subheader(f"📌 {srow['title']} — `{sku}`")
+
+    d1, d2 = st.columns([1, 2])
+    with d1:
+        st.markdown("**Mock shipment**")
+        mock_units = st.number_input("Hypothetical units", 0, 100000, 0, key=f"mock_{sku}")
+        if mock_units > 0 and srow["daily_avg"] > 0:
+            future = round((srow["fulfillable_plus_inbound"] + mock_units) / srow["daily_avg"])
+            st.success(f"Current DOI {srow['current_doi']}d → future DOI **{future}d** with +{mock_units:,} units")
+        elif mock_units > 0:
+            st.info("No sales velocity for this SKU, so DOI can't be projected.")
+
+        st.markdown("**Note**")
+        existing_note = notes_df.loc[notes_df["sku"] == sku, "note"]
+        current_note = existing_note.iloc[0] if len(existing_note) else ""
+        new_note = st.text_area("Note (empty = delete)", value=current_note, key=f"note_{sku}", label_visibility="collapsed")
+        if st.button("💾 Save note", key=f"savenote_{sku}"):
+            store.save_note(brand, sku, new_note, updated_by="team")
+            st.toast("Note saved.")
+            st.rerun()
+
+        st.markdown("**Quick actions**")
+        st.button("🚚 Log a shipment for this SKU", key=f"shipbtn_{sku}",
+                   on_click=goto, args=("Shipments", brand), kwargs={"prefill_sku": sku})
+
+    with d2:
+        st.markdown("**DOI history**")
+        days = st.radio("Range", [30, 60, 90], horizontal=True, index=2, key=f"range_{sku}")
+        hist = doi_history.get_history_by_sku(brand, sku, days)
+        if hist.empty:
+            st.info("No history yet for this SKU — a snapshot is saved automatically once per day; "
+                     "check back tomorrow to start seeing a trend.")
+        else:
+            chart_df = hist.set_index("snapshot_date")[["doi", "future_doi"]]
+            chart_df.columns = ["Current DOI", "Future DOI"]
+            st.line_chart(chart_df)
+            stats_box = doi_history.sku_stats(hist)
+            if stats_box:
+                sc1, sc2, sc3 = st.columns(3)
+                sc1.metric("Avg DOI", stats_box["avg_doi"])
+                sc2.metric("Min / Max", f"{stats_box['min_doi']} / {stats_box['max_doi']}")
+                trend_val = stats_box["trend"]
+                sc3.metric("Trend", f"{'+' if trend_val >= 0 else ''}{trend_val}d", delta=trend_val)
