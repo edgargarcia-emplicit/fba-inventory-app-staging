@@ -34,8 +34,36 @@ def doi_flag(doi, target):
     return "🔴"
 
 
+def _trend_flag(row) -> str:
+    if row["units_7day"] <= 0 and row["units_30day"] <= 0:
+        return ""
+    d7 = row["units_7day"] / 7
+    d30 = row["units_30day"] / 30 if row["units_30day"] > 0 else 0
+    d90 = row["units_90day"] / 90 if row["units_90day"] > 0 else 0
+    vs30 = (d7 - d30) / d30 if d30 > 0 else 0
+    vs90 = (d7 - d90) / d90 if d90 > 0 else 0
+    if vs30 >= 0.40 and vs90 >= 0.25:
+        return "🔥 Hot"
+    if vs30 >= 0.20 or vs90 >= 0.20:
+        return "📈 Rising"
+    return ""
+
+
+def _action_text(row) -> str:
+    total_aged = row.get("inv_age_181_270", 0) + row.get("inv_age_271_365", 0) + row.get("inv_age_365_plus", 0)
+    if row.get("replenish") and row.get("order_units_calc", 0) > 0:
+        return f"Order {row['order_units_calc']:,.0f} units ({row['order_cases_calc']:.0f} cases)"
+    if row.get("replenish"):
+        return "Replenish"
+    if total_aged > 0:
+        return "Review/Remove"
+    if row.get("ais_qty_total", 0) > 0 or row.get("inv_age_91_180", 0) > 0:
+        return "Monitor"
+    return "✓ OK"
+
+
 def compute_derived(df: pd.DataFrame, target_doi: int, lead_time: int) -> pd.DataFrame:
-    """Add DOI, replenishment, and order-timing columns (standard, non-Prime-Day mode)."""
+    """Add DOI, replenishment, order-timing, trend, and action columns (standard mode)."""
     df = df.copy()
     if df.empty:
         return df
@@ -58,6 +86,9 @@ def compute_derived(df: pd.DataFrame, target_doi: int, lead_time: int) -> pd.Dat
                             + df.get("qty_ais_241_270", 0) + df.get("qty_ais_271_300", 0)
                             + df.get("qty_ais_301_330", 0) + df.get("qty_ais_331_365", 0)
                             + df.get("qty_ais_365_plus", 0))
+    df["d7_avg"] = (df["units_7day"] / 7).round(1)
+    df["trend"] = df.apply(_trend_flag, axis=1)
+    df["action"] = df.apply(_action_text, axis=1)
     return df
 
 
