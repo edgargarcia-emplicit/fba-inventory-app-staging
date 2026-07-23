@@ -2,7 +2,7 @@
 calc.py — Shared inventory math, used by the dashboard, overview, and digest
 pages so the formulas live in exactly one place (the original plugin had
 this logic duplicated across the AJAX handler, database class, and email
-digest — this consolidates it here).
+digest — this consolidates it).
 """
 
 import math
@@ -34,19 +34,22 @@ def doi_flag(doi, target):
     return "🔴"
 
 
-def _trend_flag(row) -> str:
+def _trend_calc(row) -> pd.Series:
+    """Trend flag plus the actual 7d-vs-30d and 7d-vs-90d percentage changes (as in the original digest)."""
     if row["units_7day"] <= 0 and row["units_30day"] <= 0:
-        return ""
+        return pd.Series({"trend": "", "trend_vs30": None, "trend_vs90": None})
     d7 = row["units_7day"] / 7
     d30 = row["units_30day"] / 30 if row["units_30day"] > 0 else 0
     d90 = row["units_90day"] / 90 if row["units_90day"] > 0 else 0
     vs30 = (d7 - d30) / d30 if d30 > 0 else 0
     vs90 = (d7 - d90) / d90 if d90 > 0 else 0
     if vs30 >= 0.40 and vs90 >= 0.25:
-        return "🔥 Hot"
-    if vs30 >= 0.20 or vs90 >= 0.20:
-        return "📈 Rising"
-    return ""
+        flag = "🔥 Hot"
+    elif vs30 >= 0.20 or vs90 >= 0.20:
+        flag = "📈 Rising"
+    else:
+        flag = ""
+    return pd.Series({"trend": flag, "trend_vs30": round(vs30 * 100), "trend_vs90": round(vs90 * 100)})
 
 
 def _action_text(row) -> str:
@@ -65,7 +68,7 @@ def _action_text(row) -> str:
 _DERIVED_COLS = [
     "inbound_total", "current_doi", "units_needed", "order_units_calc", "order_cases_calc",
     "days_until_order", "order_by", "order_status", "doi_flag", "aged_181_plus",
-    "ais_qty_total", "d7_avg", "trend", "action",
+    "ais_qty_total", "d7_avg", "trend", "trend_vs30", "trend_vs90", "action",
 ]
 _PD_COLS = [
     "pd_multiplier", "pd_daily_avg", "pd_doi_event", "pd_units_needed",
@@ -110,7 +113,8 @@ def compute_derived(df: pd.DataFrame, target_doi: int, lead_time: int) -> pd.Dat
                             + df.get("qty_ais_301_330", 0) + df.get("qty_ais_331_365", 0)
                             + df.get("qty_ais_365_plus", 0))
     df["d7_avg"] = (df["units_7day"] / 7).round(1)
-    df["trend"] = df.apply(_trend_flag, axis=1)
+    trend_cols = df.apply(_trend_calc, axis=1)
+    df = pd.concat([df, trend_cols], axis=1)
     df["action"] = df.apply(_action_text, axis=1)
     return df
 
