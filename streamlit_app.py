@@ -89,6 +89,318 @@ def goto(page_name, brand_code=None, prefill_sku=None):
         st.session_state["prefill_sku"] = prefill_sku
 
 
+def render_dashboard_module(theme: str = "default"):
+    """
+    Renders the full inventory dashboard: KPI cards, the editable grid
+    (Mock Units / Future DOI / Notes), filters, CSV export, and the SKU
+    deep-dive section.
+
+    theme="default" — plain Streamlit look (the "Dashboard" page).
+    theme="branded" — same exact functionality, restyled to match the
+    Emplicit email digest's branding (dark header banner, accent-colored
+    buttons, card-style KPI metrics), used by "Inventory Report (Beta)".
+
+    Both pages call this same function so they can never drift apart —
+    the WordPress plugin's bug reports taught us what happens when the
+    same logic gets duplicated across files (see CHANGELOG.md).
+
+    Note: Streamlit's editable table widget can't render colored badge
+    pills inside individual cells the way the HTML digest table can — a
+    genuine platform limit, not a styling choice. Flag/Alerts/Trend/Status
+    still show as emoji/text either way; everything AROUND the grid
+    (header, KPI cards, buttons, section styling) is what changes between
+    themes.
+    """
+    if theme == "branded":
+        st.markdown("""
+        <style>
+        div[data-testid="stMetric"] {
+            background: #ffffff; border: 1px solid #e5e7eb; border-radius: 8px;
+            padding: 12px 16px; box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+        }
+        div[data-testid="stMetricValue"] { color: #e8404a; }
+        div[data-testid="stMetricLabel"] {
+            text-transform: uppercase; letter-spacing: .05em; font-size: 11px !important;
+        }
+        .stButton > button[kind="primary"], .stDownloadButton > button {
+            background-color: #e8404a; border-color: #e8404a; color: white;
+        }
+        div[data-testid="stExpander"] summary {
+            font-weight: 700; text-transform: uppercase; font-size: 12px; letter-spacing: .05em;
+            color: #1a1a2e;
+        }
+        h3, .stMarkdown h3 { color: #1a1a2e; }
+        </style>
+        """, unsafe_allow_html=True)
+        st.markdown(f"""
+        <div style="background:#0d1117;border-radius:12px 12px 0 0;padding:24px 32px">
+          <div style="color:#e8404a;font-size:11px;font-weight:600;letter-spacing:.08em;
+                      text-transform:uppercase;font-family:sans-serif">FBA Inventory Report</div>
+          <div style="color:#fff;font-size:26px;font-weight:700;margin-top:4px;
+                      font-family:sans-serif">{active['client_name']}</div>
+          <div style="color:#9ca3af;font-size:12px;margin-top:4px;font-family:sans-serif">
+            {active['brand_code']} · {active['marketplace']}</div>
+        </div>
+        <div style="background:#fff;border:1px solid #e5e7eb;border-top:none;
+                    border-radius:0 0 12px 12px;padding:12px 32px;margin-bottom:20px">
+          <span style="color:#6b7280;font-size:12px;font-family:sans-serif">
+            Fully editable — identical functionality to the Dashboard page, Emplicit-branded styling.</span>
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        st.header(f"{active['client_name']} — Inventory Dashboard")
+
+    snapshot = inv["snapshot_date"].iloc[0] if len(inv) else ""
+
+    active_inv = calc.active_only(inv)
+
+    # ---- Target DOI / lead time controls ----
+    c1, c2, c3 = st.columns([1, 1, 2])
+    target_doi = c1.number_input("Target DOI (days)", 1, 365, settings["target_doi"])
+    lead_time = c2.number_input("Lead time (days)", 1, 180, settings["lead_time"])
+    if (target_doi, lead_time) != (settings["target_doi"], settings["lead_time"]):
+        if c3.button("💾 Save settings"):
+            store.save_settings(brand, target_doi, lead_time)
+            st.toast("Settings saved.")
+            st.rerun()
+
+    derived = calc.compute_derived(active_inv, target_doi, lead_time)
+    doi_history.snapshot_today(brand, derived)
+    health_counts = health.get_notification_counts(brand)
+
+    # ---- Prime Day settings ----
+    pd_settings = store.get_prime_day(brand)
+    with st.expander(f"🎯 Prime Day mode {'(ACTIVE)' if pd_settings['active'] else ''}"):
+        with st.form("pd_form"):
+            pd_active = st.checkbox("Active", value=pd_settings["active"])
+            c1, c2 = st.columns(2)
+            pd_mult = c1.number_input("Demand multiplier", min_value=1.0, value=pd_settings["multiplier"], step=0.1)
+            pd_recovery = c2.number_input("Post-event recovery days", min_value=0, value=pd_settings["recovery_days"])
+            c3, c4, c5 = st.columns(3)
+            pd_start = c3.text_input("Event start (YYYY-MM-DD)", value=pd_settings["start_date"])
+            pd_end = c4.text_input("Event end (YYYY-MM-DD)", value=pd_settings["end_date"])
+            pd_cutoff = c5.text_input("Shipment cutoff (YYYY-MM-DD)", value=pd_settings["cutoff_date"])
+            c6, c7 = st.columns(2)
+            pd_sup_lt = c6.number_input("Supplier lead time (days)", min_value=0, value=pd_settings["supplier_lead_time"])
+            pd_amz_lt = c7.number_input("Amazon lead time (days)", min_value=0, value=pd_settings["amazon_lead_time"])
+            if st.form_submit_button("Save Prime Day settings"):
+                store.save_prime_day(brand, active=pd_active, multiplier=pd_mult, start_date=pd_start,
+                                      end_date=pd_end, cutoff_date=pd_cutoff, supplier_lead_time=pd_sup_lt,
+                                      amazon_lead_time=pd_amz_lt, recovery_days=pd_recovery,
+                                      sku_multipliers_json=pd_settings["sku_multipliers_json"])
+                st.success("Saved.")
+                st.rerun()
+
+    mode = "prime_day" if pd_settings["active"] else "standard"
+    if pd_settings["active"]:
+        mode = st.radio("Export / view mode", ["standard", "prime_day"], horizontal=True,
+                         format_func=lambda m: "Standard" if m == "standard" else "🎯 Prime Day projections")
+
+    if mode == "prime_day":
+        derived = calc.compute_prime_day(active_inv, pd_settings, target_doi, lead_time)
+
+    # ---- KPI cards ----
+    in_stock = (derived["fulfillable"] > 0).sum() if not derived.empty else 0
+    total_active = len(derived)
+    aged_n = int((derived["ais_qty_total"] > 0).sum()) if not derived.empty and "ais_qty_total" in derived else 0
+    trending_n = int((derived["trend"] != "").sum()) if not derived.empty and "trend" in derived else 0
+    stranded_n = sum(1 for v in health_counts.values() if "stranded" in v)
+    unful_n = sum(1 for v in health_counts.values() if "unfulfillable" in v)
+
+    k1, k2, k3, k4, k5, k6 = st.columns(6)
+    k1.metric("Active SKUs", total_active)
+    k2.metric("In-stock rate", f"{(in_stock / total_active * 100):.1f}%" if total_active else "—")
+    if mode == "prime_day":
+        k3.metric("Need PD order", int((derived["pd_units_to_order"] > 0).sum()) if not derived.empty else 0)
+        k4.metric("Too late for FBA", int(derived["pd_status"].str.contains("TOO LATE").sum()) if not derived.empty else 0)
+    else:
+        k3.metric("Below target DOI", int((derived["current_doi"] < target_doi).sum()) if not derived.empty else 0)
+        k4.metric("Need reorder now", int((derived["order_units_calc"] > 0).sum()) if not derived.empty else 0)
+    k5.metric("Aged SKUs", aged_n)
+    k6.metric("Trending SKUs", trending_n)
+    if stranded_n or unful_n:
+        st.caption(f"🟥 {stranded_n} stranded · 🟧 {unful_n} unfulfillable — flagged in the Alerts column below, "
+                    f"full detail on the Health Report page.")
+    if snapshot:
+        st.caption(f"Sheet snapshot date: {snapshot}")
+
+    st.divider()
+
+    # ---- Filters ----
+    f1, f2 = st.columns([3, 1])
+    search = f1.text_input("🔍 Search title / ASIN / SKU", "")
+    show_inactive = f2.toggle("Show inactive SKUs")
+
+    table = calc.compute_derived(inv, target_doi, lead_time) if show_inactive else derived
+    if show_inactive and mode == "prime_day":
+        table = calc.compute_prime_day(inv, pd_settings, target_doi, lead_time)
+    if search:
+        q = search.lower()
+        mask = (table["title"].str.lower().str.contains(q, na=False)
+                | table["asin"].str.lower().str.contains(q, na=False)
+                | table["sku"].str.lower().str.contains(q, na=False))
+        table = table[mask]
+    table = table.reset_index(drop=True)
+
+    if table.empty:
+        st.info("No active SKUs found for this client. If that's unexpected, check "
+                "'Show inactive SKUs' above, or confirm the sheet's SKU Status column.")
+        st.stop()
+
+    # ---- Health badges + note preview (everything inline, no separate panels) ----
+    table["alerts"] = table["sku"].map(lambda s: (
+        ("🟥" if health_counts.get(s, {}).get("stranded") else "")
+        + ("🟧" if health_counts.get(s, {}).get("unfulfillable") else "")
+    ))
+    notes_df = store.get_notes(brand)
+    table["note_preview"] = table["sku"].map(
+        lambda s: (notes_df.loc[notes_df["sku"] == s, "note"].iloc[0]
+                   if (notes_df["sku"] == s).any() else ""))
+    table["synced"] = snapshot
+
+    # ---- Main table: one wide, dense grid, with Mock Units / Future DOI / Note editable inline ----
+    if mode == "prime_day":
+        display_cols = {
+            "alerts": "Alerts", "doi_flag": "Flag", "trend": "Trend", "trend_vs30": "vs 30d %",
+            "trend_vs90": "vs 90d %", "title": "Title", "sku": "SKU",
+            "fulfillable": "Fulfillable", "fulfillable_plus_inbound": "Fulf.+Inbound",
+            "daily_avg": "Daily Avg", "pd_multiplier": "PD Mult.", "pd_daily_avg": "PD Daily Avg",
+            "pd_doi_event": "PD DOI (event)", "pd_units_to_order": "PD Order Units",
+            "pd_cases_to_order": "PD Order Cases", "pd_status": "PD Status",
+            "inv_age_91_180": "91-180d", "inv_age_181_270": "181-270d", "aged_181_plus": "181d+",
+            "ais_qty_total": "AIS Units", "synced": "Synced",
+        }
+        daily_col = "pd_daily_avg"
+    else:
+        display_cols = {
+            "alerts": "Alerts", "doi_flag": "Flag", "trend": "Trend", "trend_vs30": "vs 30d %",
+            "trend_vs90": "vs 90d %", "title": "Title", "sku": "SKU", "asin": "ASIN",
+            "fulfillable": "Fulfillable", "fulfillable_plus_inbound": "Fulf.+Inbound",
+            "units_7day": "7d Units", "units_30day": "30d Units", "units_60day": "60d Units", "units_90day": "90d Units",
+            "d7_avg": "7d Avg", "daily_avg": "Daily Avg",
+            "current_doi": "DOI", "order_by": "Order By", "order_status": "Status", "action": "Action",
+            "order_units_calc": "Order Units", "order_cases_calc": "Order Cases",
+            "inv_age_91_180": "91-180d", "inv_age_181_270": "181-270d", "aged_181_plus": "181d+",
+            "ais_qty_total": "AIS Units", "pct_sales_mix": "% Mix", "synced": "Synced",
+        }
+        daily_col = "daily_avg"
+
+    edit_df = safe_view(table, display_cols)
+    editor_key = f"main_editor_{brand}_{mode}_{show_inactive}_{hash(search)}"
+
+    # Mock Units and Note are tracked in our OWN persistent session_state dicts, keyed by SKU,
+    # rather than relying on data_editor's own edited_rows diff. That diff is relative to
+    # whatever base dataframe we hand the widget each render — if we bake the last edit back in
+    # as the new baseline (needed so Future DOI can update), the diff looks like "no change"
+    # again on the very next rerun, silently reverting the value. Keeping our own store, synced
+    # via on_change the instant an edit happens, avoids that entirely.
+    mock_store = st.session_state.setdefault("mock_units_by_sku", {})
+    pending_notes = st.session_state.setdefault("pending_notes_by_sku", {})
+
+    # Sync any in-progress edit out of the widget's own transient diff into our stable stores,
+    # every run. Not using on_change for this: the sync has to happen before we rebuild the base
+    # dataframe below anyway, so doing it inline here is simpler and (per direct testing) more
+    # reliably triggered than a callback.
+    _edited_now = st.session_state.get(editor_key, {}).get("edited_rows", {})
+    for _pos_str, _changes in _edited_now.items():
+        _pos = int(_pos_str)
+        if _pos >= len(table):
+            continue
+        _sku_val = table.iloc[_pos]["sku"]
+        if "Mock Units" in _changes:
+            mock_store[_sku_val] = _changes["Mock Units"]
+        if "Note" in _changes:
+            pending_notes[_sku_val] = _changes["Note"]
+
+
+    mock_units_col = [mock_store.get(sku, 0) for sku in table["sku"]]
+    note_col = [pending_notes.get(sku, orig) for sku, orig in zip(table["sku"], table["note_preview"])]
+
+    edit_df.insert(list(edit_df.columns).index("DOI") + 1 if "DOI" in edit_df.columns else len(edit_df.columns),
+                   "Mock Units", mock_units_col)
+
+
+    def _future_doi(pos):
+        mu = mock_units_col[pos]
+        dv = table.iloc[pos][daily_col] if daily_col in table.columns else 0
+        fi = table.iloc[pos]["fulfillable_plus_inbound"]
+        if mu and dv and dv > 0:
+            return round((fi + mu) / dv)
+        return None
+
+
+    edit_df.insert(list(edit_df.columns).index("Mock Units") + 1, "Future DOI",
+                   [_future_doi(i) for i in range(len(table))])
+    edit_df["Note"] = note_col
+
+    result = st.data_editor(
+        edit_df, use_container_width=True, hide_index=True, height=520, key=editor_key,
+        disabled=[c for c in edit_df.columns if c not in ("Mock Units", "Note")],
+        column_config={
+            "Daily Avg": st.column_config.NumberColumn(format="%.1f"),
+            "7d Avg": st.column_config.NumberColumn(format="%.1f"),
+            "% Mix": st.column_config.NumberColumn(format="%.1f%%"),
+            "vs 30d %": st.column_config.NumberColumn(format="%d%%"),
+            "vs 90d %": st.column_config.NumberColumn(format="%d%%"),
+            "Mock Units": st.column_config.NumberColumn(help="Type a hypothetical incoming quantity to see Future DOI update.", min_value=0),
+            "Future DOI": st.column_config.NumberColumn(help="Projected DOI if the Mock Units quantity arrived today.", disabled=True),
+            "Note": st.column_config.TextColumn(width="medium"),
+        },
+    )
+
+    if st.button("💾 Save note changes"):
+        saved = 0
+        for pos in range(len(table)):
+            sku_val = table.iloc[pos]["sku"]
+            new_note_val = str(pending_notes.get(sku_val, table.iloc[pos]["note_preview"]) or "")
+            original = notes_df.loc[notes_df["sku"] == sku_val, "note"]
+            original_val = str(original.iloc[0]) if len(original) else ""
+            if new_note_val != original_val:
+                store.save_note(brand, sku_val, new_note_val, updated_by="team")
+                pending_notes.pop(sku_val, None)
+                saved += 1
+        st.toast(f"Saved {saved} note(s)." if saved else "No note changes to save.")
+        st.rerun()
+
+    # ---- CSV export (formula-injection safe, mode-aware) ----
+    export = table.copy()
+    for col in ("title", "sku", "asin", "sku_status"):
+        if col in export.columns:
+            export[col] = export[col].map(csv_safe)
+    mode_label = "primeday_" if mode == "prime_day" else ""
+    st.download_button("⬇️ Export CSV", export.to_csv(index=False).encode("utf-8"),
+                        file_name=f"{brand}_inventory_{mode_label}{date.today()}.csv", mime="text/csv")
+
+    # ---- SKU deep-dive: DOI history chart + quick shipment action ----
+    # (st.data_editor doesn't support click-to-select like st.dataframe did, so this is a
+    # selectbox instead of a row click — everything else above stays inline on the grid.)
+    st.divider()
+    st.subheader("🔎 SKU deep-dive")
+    dd_sku = st.selectbox("SKU", table["sku"].tolist(), key="deepdive_sku")
+    d1, d2 = st.columns([2, 1])
+    with d1:
+        days = st.radio("DOI history range", [30, 60, 90], horizontal=True, index=2, key=f"range_{dd_sku}")
+        hist = doi_history.get_history_by_sku(brand, dd_sku, days)
+        if hist.empty:
+            st.info("No history yet for this SKU — a snapshot is saved automatically once per day; "
+                     "check back tomorrow to start seeing a trend.")
+        else:
+            chart_df = hist.set_index("snapshot_date")[["doi", "future_doi"]]
+            chart_df.columns = ["Current DOI", "Future DOI"]
+            st.line_chart(chart_df)
+            stats_box = doi_history.sku_stats(hist)
+            if stats_box:
+                sc1, sc2, sc3 = st.columns(3)
+                sc1.metric("Avg DOI", stats_box["avg_doi"])
+                sc2.metric("Min / Max", f"{stats_box['min_doi']} / {stats_box['max_doi']}")
+                trend_val = stats_box["trend"]
+                sc3.metric("Trend", f"{'+' if trend_val >= 0 else ''}{trend_val}d", delta=trend_val)
+    with d2:
+        st.markdown("**Quick actions**")
+        st.button("🚚 Log a shipment for this SKU", key=f"shipbtn_{dd_sku}",
+                   on_click=goto, args=("Shipments", brand), kwargs={"prefill_sku": dd_sku})
+
+
 # =============================================================== sidebar
 clients = store.get_clients()
 PAGES = ["Overview", "Dashboard", "Inventory Report (Beta)", "Health Report", "Shipments", "Digest Preview", "Clients"]
@@ -293,13 +605,7 @@ if page == "Digest Preview":
 
 # =============================================================== INVENTORY REPORT (BETA)
 if page == "Inventory Report (Beta)":
-    st.header(f"🗂️ Inventory Report — {active['client_name']}")
-    st.caption("Same data as the Dashboard, shown in the branded card/table style from the email digest — "
-                "an alternative layout for comparison. Nothing here is editable; use the Dashboard for that.")
-    ships_df = store.get_shipments(brand)
-    section_html = digest.build_client_section(active, inv, settings["target_doi"], settings["lead_time"], ships_df)
-    full_html = digest.wrap_email(date.today().strftime("%A, %B %d, %Y"), "just now", section_html)
-    st.components.v1.html(full_html, height=1400, scrolling=True)
+    render_dashboard_module(theme="branded")
     st.stop()
 
 
@@ -479,253 +785,4 @@ if page == "Shipments":
 
 
 # =============================================================== DASHBOARD
-st.header(f"{active['client_name']} — Inventory Dashboard")
-snapshot = inv["snapshot_date"].iloc[0] if len(inv) else ""
-
-active_inv = calc.active_only(inv)
-
-# ---- Target DOI / lead time controls ----
-c1, c2, c3 = st.columns([1, 1, 2])
-target_doi = c1.number_input("Target DOI (days)", 1, 365, settings["target_doi"])
-lead_time = c2.number_input("Lead time (days)", 1, 180, settings["lead_time"])
-if (target_doi, lead_time) != (settings["target_doi"], settings["lead_time"]):
-    if c3.button("💾 Save settings"):
-        store.save_settings(brand, target_doi, lead_time)
-        st.toast("Settings saved.")
-        st.rerun()
-
-derived = calc.compute_derived(active_inv, target_doi, lead_time)
-doi_history.snapshot_today(brand, derived)
-health_counts = health.get_notification_counts(brand)
-
-# ---- Prime Day settings ----
-pd_settings = store.get_prime_day(brand)
-with st.expander(f"🎯 Prime Day mode {'(ACTIVE)' if pd_settings['active'] else ''}"):
-    with st.form("pd_form"):
-        pd_active = st.checkbox("Active", value=pd_settings["active"])
-        c1, c2 = st.columns(2)
-        pd_mult = c1.number_input("Demand multiplier", min_value=1.0, value=pd_settings["multiplier"], step=0.1)
-        pd_recovery = c2.number_input("Post-event recovery days", min_value=0, value=pd_settings["recovery_days"])
-        c3, c4, c5 = st.columns(3)
-        pd_start = c3.text_input("Event start (YYYY-MM-DD)", value=pd_settings["start_date"])
-        pd_end = c4.text_input("Event end (YYYY-MM-DD)", value=pd_settings["end_date"])
-        pd_cutoff = c5.text_input("Shipment cutoff (YYYY-MM-DD)", value=pd_settings["cutoff_date"])
-        c6, c7 = st.columns(2)
-        pd_sup_lt = c6.number_input("Supplier lead time (days)", min_value=0, value=pd_settings["supplier_lead_time"])
-        pd_amz_lt = c7.number_input("Amazon lead time (days)", min_value=0, value=pd_settings["amazon_lead_time"])
-        if st.form_submit_button("Save Prime Day settings"):
-            store.save_prime_day(brand, active=pd_active, multiplier=pd_mult, start_date=pd_start,
-                                  end_date=pd_end, cutoff_date=pd_cutoff, supplier_lead_time=pd_sup_lt,
-                                  amazon_lead_time=pd_amz_lt, recovery_days=pd_recovery,
-                                  sku_multipliers_json=pd_settings["sku_multipliers_json"])
-            st.success("Saved.")
-            st.rerun()
-
-mode = "prime_day" if pd_settings["active"] else "standard"
-if pd_settings["active"]:
-    mode = st.radio("Export / view mode", ["standard", "prime_day"], horizontal=True,
-                     format_func=lambda m: "Standard" if m == "standard" else "🎯 Prime Day projections")
-
-if mode == "prime_day":
-    derived = calc.compute_prime_day(active_inv, pd_settings, target_doi, lead_time)
-
-# ---- KPI cards ----
-in_stock = (derived["fulfillable"] > 0).sum() if not derived.empty else 0
-total_active = len(derived)
-aged_n = int((derived["ais_qty_total"] > 0).sum()) if not derived.empty and "ais_qty_total" in derived else 0
-trending_n = int((derived["trend"] != "").sum()) if not derived.empty and "trend" in derived else 0
-stranded_n = sum(1 for v in health_counts.values() if "stranded" in v)
-unful_n = sum(1 for v in health_counts.values() if "unfulfillable" in v)
-
-k1, k2, k3, k4, k5, k6 = st.columns(6)
-k1.metric("Active SKUs", total_active)
-k2.metric("In-stock rate", f"{(in_stock / total_active * 100):.1f}%" if total_active else "—")
-if mode == "prime_day":
-    k3.metric("Need PD order", int((derived["pd_units_to_order"] > 0).sum()) if not derived.empty else 0)
-    k4.metric("Too late for FBA", int(derived["pd_status"].str.contains("TOO LATE").sum()) if not derived.empty else 0)
-else:
-    k3.metric("Below target DOI", int((derived["current_doi"] < target_doi).sum()) if not derived.empty else 0)
-    k4.metric("Need reorder now", int((derived["order_units_calc"] > 0).sum()) if not derived.empty else 0)
-k5.metric("Aged SKUs", aged_n)
-k6.metric("Trending SKUs", trending_n)
-if stranded_n or unful_n:
-    st.caption(f"🟥 {stranded_n} stranded · 🟧 {unful_n} unfulfillable — flagged in the Alerts column below, "
-                f"full detail on the Health Report page.")
-if snapshot:
-    st.caption(f"Sheet snapshot date: {snapshot}")
-
-st.divider()
-
-# ---- Filters ----
-f1, f2 = st.columns([3, 1])
-search = f1.text_input("🔍 Search title / ASIN / SKU", "")
-show_inactive = f2.toggle("Show inactive SKUs")
-
-table = calc.compute_derived(inv, target_doi, lead_time) if show_inactive else derived
-if show_inactive and mode == "prime_day":
-    table = calc.compute_prime_day(inv, pd_settings, target_doi, lead_time)
-if search:
-    q = search.lower()
-    mask = (table["title"].str.lower().str.contains(q, na=False)
-            | table["asin"].str.lower().str.contains(q, na=False)
-            | table["sku"].str.lower().str.contains(q, na=False))
-    table = table[mask]
-table = table.reset_index(drop=True)
-
-if table.empty:
-    st.info("No active SKUs found for this client. If that's unexpected, check "
-            "'Show inactive SKUs' above, or confirm the sheet's SKU Status column.")
-    st.stop()
-
-# ---- Health badges + note preview (everything inline, no separate panels) ----
-table["alerts"] = table["sku"].map(lambda s: (
-    ("🟥" if health_counts.get(s, {}).get("stranded") else "")
-    + ("🟧" if health_counts.get(s, {}).get("unfulfillable") else "")
-))
-notes_df = store.get_notes(brand)
-table["note_preview"] = table["sku"].map(
-    lambda s: (notes_df.loc[notes_df["sku"] == s, "note"].iloc[0]
-               if (notes_df["sku"] == s).any() else ""))
-table["synced"] = snapshot
-
-# ---- Main table: one wide, dense grid, with Mock Units / Future DOI / Note editable inline ----
-if mode == "prime_day":
-    display_cols = {
-        "alerts": "Alerts", "doi_flag": "Flag", "trend": "Trend", "trend_vs30": "vs 30d %",
-        "trend_vs90": "vs 90d %", "title": "Title", "sku": "SKU",
-        "fulfillable": "Fulfillable", "fulfillable_plus_inbound": "Fulf.+Inbound",
-        "daily_avg": "Daily Avg", "pd_multiplier": "PD Mult.", "pd_daily_avg": "PD Daily Avg",
-        "pd_doi_event": "PD DOI (event)", "pd_units_to_order": "PD Order Units",
-        "pd_cases_to_order": "PD Order Cases", "pd_status": "PD Status",
-        "inv_age_91_180": "91-180d", "inv_age_181_270": "181-270d", "aged_181_plus": "181d+",
-        "ais_qty_total": "AIS Units", "synced": "Synced",
-    }
-    daily_col = "pd_daily_avg"
-else:
-    display_cols = {
-        "alerts": "Alerts", "doi_flag": "Flag", "trend": "Trend", "trend_vs30": "vs 30d %",
-        "trend_vs90": "vs 90d %", "title": "Title", "sku": "SKU", "asin": "ASIN",
-        "fulfillable": "Fulfillable", "fulfillable_plus_inbound": "Fulf.+Inbound",
-        "units_7day": "7d Units", "units_30day": "30d Units", "units_60day": "60d Units", "units_90day": "90d Units",
-        "d7_avg": "7d Avg", "daily_avg": "Daily Avg",
-        "current_doi": "DOI", "order_by": "Order By", "order_status": "Status", "action": "Action",
-        "order_units_calc": "Order Units", "order_cases_calc": "Order Cases",
-        "inv_age_91_180": "91-180d", "inv_age_181_270": "181-270d", "aged_181_plus": "181d+",
-        "ais_qty_total": "AIS Units", "pct_sales_mix": "% Mix", "synced": "Synced",
-    }
-    daily_col = "daily_avg"
-
-edit_df = safe_view(table, display_cols)
-editor_key = f"main_editor_{brand}_{mode}_{show_inactive}_{hash(search)}"
-
-# Mock Units and Note are tracked in our OWN persistent session_state dicts, keyed by SKU,
-# rather than relying on data_editor's own edited_rows diff. That diff is relative to
-# whatever base dataframe we hand the widget each render — if we bake the last edit back in
-# as the new baseline (needed so Future DOI can update), the diff looks like "no change"
-# again on the very next rerun, silently reverting the value. Keeping our own store, synced
-# via on_change the instant an edit happens, avoids that entirely.
-mock_store = st.session_state.setdefault("mock_units_by_sku", {})
-pending_notes = st.session_state.setdefault("pending_notes_by_sku", {})
-
-# Sync any in-progress edit out of the widget's own transient diff into our stable stores,
-# every run. Not using on_change for this: the sync has to happen before we rebuild the base
-# dataframe below anyway, so doing it inline here is simpler and (per direct testing) more
-# reliably triggered than a callback.
-_edited_now = st.session_state.get(editor_key, {}).get("edited_rows", {})
-for _pos_str, _changes in _edited_now.items():
-    _pos = int(_pos_str)
-    if _pos >= len(table):
-        continue
-    _sku_val = table.iloc[_pos]["sku"]
-    if "Mock Units" in _changes:
-        mock_store[_sku_val] = _changes["Mock Units"]
-    if "Note" in _changes:
-        pending_notes[_sku_val] = _changes["Note"]
-
-
-mock_units_col = [mock_store.get(sku, 0) for sku in table["sku"]]
-note_col = [pending_notes.get(sku, orig) for sku, orig in zip(table["sku"], table["note_preview"])]
-
-edit_df.insert(list(edit_df.columns).index("DOI") + 1 if "DOI" in edit_df.columns else len(edit_df.columns),
-               "Mock Units", mock_units_col)
-
-
-def _future_doi(pos):
-    mu = mock_units_col[pos]
-    dv = table.iloc[pos][daily_col] if daily_col in table.columns else 0
-    fi = table.iloc[pos]["fulfillable_plus_inbound"]
-    if mu and dv and dv > 0:
-        return round((fi + mu) / dv)
-    return None
-
-
-edit_df.insert(list(edit_df.columns).index("Mock Units") + 1, "Future DOI",
-               [_future_doi(i) for i in range(len(table))])
-edit_df["Note"] = note_col
-
-result = st.data_editor(
-    edit_df, use_container_width=True, hide_index=True, height=520, key=editor_key,
-    disabled=[c for c in edit_df.columns if c not in ("Mock Units", "Note")],
-    column_config={
-        "Daily Avg": st.column_config.NumberColumn(format="%.1f"),
-        "7d Avg": st.column_config.NumberColumn(format="%.1f"),
-        "% Mix": st.column_config.NumberColumn(format="%.1f%%"),
-        "vs 30d %": st.column_config.NumberColumn(format="%d%%"),
-        "vs 90d %": st.column_config.NumberColumn(format="%d%%"),
-        "Mock Units": st.column_config.NumberColumn(help="Type a hypothetical incoming quantity to see Future DOI update.", min_value=0),
-        "Future DOI": st.column_config.NumberColumn(help="Projected DOI if the Mock Units quantity arrived today.", disabled=True),
-        "Note": st.column_config.TextColumn(width="medium"),
-    },
-)
-
-if st.button("💾 Save note changes"):
-    saved = 0
-    for pos in range(len(table)):
-        sku_val = table.iloc[pos]["sku"]
-        new_note_val = str(pending_notes.get(sku_val, table.iloc[pos]["note_preview"]) or "")
-        original = notes_df.loc[notes_df["sku"] == sku_val, "note"]
-        original_val = str(original.iloc[0]) if len(original) else ""
-        if new_note_val != original_val:
-            store.save_note(brand, sku_val, new_note_val, updated_by="team")
-            pending_notes.pop(sku_val, None)
-            saved += 1
-    st.toast(f"Saved {saved} note(s)." if saved else "No note changes to save.")
-    st.rerun()
-
-# ---- CSV export (formula-injection safe, mode-aware) ----
-export = table.copy()
-for col in ("title", "sku", "asin", "sku_status"):
-    if col in export.columns:
-        export[col] = export[col].map(csv_safe)
-mode_label = "primeday_" if mode == "prime_day" else ""
-st.download_button("⬇️ Export CSV", export.to_csv(index=False).encode("utf-8"),
-                    file_name=f"{brand}_inventory_{mode_label}{date.today()}.csv", mime="text/csv")
-
-# ---- SKU deep-dive: DOI history chart + quick shipment action ----
-# (st.data_editor doesn't support click-to-select like st.dataframe did, so this is a
-# selectbox instead of a row click — everything else above stays inline on the grid.)
-st.divider()
-st.subheader("🔎 SKU deep-dive")
-dd_sku = st.selectbox("SKU", table["sku"].tolist(), key="deepdive_sku")
-d1, d2 = st.columns([2, 1])
-with d1:
-    days = st.radio("DOI history range", [30, 60, 90], horizontal=True, index=2, key=f"range_{dd_sku}")
-    hist = doi_history.get_history_by_sku(brand, dd_sku, days)
-    if hist.empty:
-        st.info("No history yet for this SKU — a snapshot is saved automatically once per day; "
-                 "check back tomorrow to start seeing a trend.")
-    else:
-        chart_df = hist.set_index("snapshot_date")[["doi", "future_doi"]]
-        chart_df.columns = ["Current DOI", "Future DOI"]
-        st.line_chart(chart_df)
-        stats_box = doi_history.sku_stats(hist)
-        if stats_box:
-            sc1, sc2, sc3 = st.columns(3)
-            sc1.metric("Avg DOI", stats_box["avg_doi"])
-            sc2.metric("Min / Max", f"{stats_box['min_doi']} / {stats_box['max_doi']}")
-            trend_val = stats_box["trend"]
-            sc3.metric("Trend", f"{'+' if trend_val >= 0 else ''}{trend_val}d", delta=trend_val)
-with d2:
-    st.markdown("**Quick actions**")
-    st.button("🚚 Log a shipment for this SKU", key=f"shipbtn_{dd_sku}",
-               on_click=goto, args=("Shipments", brand), kwargs={"prefill_sku": dd_sku})
+render_dashboard_module(theme="default")
