@@ -541,6 +541,11 @@ if search:
     table = table[mask]
 table = table.reset_index(drop=True)
 
+if table.empty:
+    st.info("No active SKUs found for this client. If that's unexpected, check "
+            "'Show inactive SKUs' above, or confirm the sheet's SKU Status column.")
+    st.stop()
+
 # ---- Health badges + note preview (everything inline, no separate panels) ----
 table["alerts"] = table["sku"].map(lambda s: (
     ("🟥" if health_counts.get(s, {}).get("stranded") else "")
