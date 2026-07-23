@@ -49,6 +49,25 @@ def csv_safe(value):
     return s
 
 
+def safe_view(table: pd.DataFrame, display_cols: dict) -> pd.DataFrame:
+    """
+    Build the display table without ever KeyError-ing if an expected column
+    is missing. This shouldn't happen in normal operation, but calc.py and
+    streamlit_app.py must be updated together — if only one gets deployed,
+    the columns each expects can fall out of sync. Rather than crash the
+    whole page, show what's available and flag what's missing.
+    """
+    missing = [c for c in display_cols if c not in table.columns]
+    if missing:
+        st.warning(
+            f"Some expected data columns are missing and have been skipped: {missing}. "
+            "This usually means calc.py and streamlit_app.py are out of sync in your "
+            "deployment — double check both files were updated together in your GitHub repo."
+        )
+    present = {k: v for k, v in display_cols.items() if k in table.columns}
+    return table[list(present)].rename(columns=present)
+
+
 def goto(page_name, brand_code=None, prefill_sku=None):
     """
     Switch page (and optionally client / a SKU to prefill) from a button click.
@@ -579,7 +598,7 @@ else:
         "inv_age_91_180": "91-180d", "inv_age_181_270": "181-270d", "aged_181_plus": "181d+",
         "ais_qty_total": "AIS Units", "pct_sales_mix": "% Mix", "note_preview": "Note", "synced": "Synced",
     }
-view = table[list(display_cols)].rename(columns=display_cols)
+view = safe_view(table, display_cols)
 event = st.dataframe(
     view, use_container_width=True, hide_index=True, height=520,
     on_select="rerun", selection_mode="single-row", key="main_grid",
