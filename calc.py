@@ -2,7 +2,7 @@
 calc.py — Shared inventory math, used by the dashboard, overview, and digest
 pages so the formulas live in exactly one place (the original plugin had
 this logic duplicated across the AJAX handler, database class, and email
-digest — this consolidates-it).
+digest — this consolidates itt).
 """
 
 import math
@@ -73,8 +73,8 @@ def _action_text(row) -> str:
 
 _DERIVED_COLS = [
     "inbound_total", "current_doi", "units_needed", "order_units_calc", "order_cases_calc",
-    "days_until_order", "order_by", "order_status", "doi_flag", "doi_display", "doi_pct_of_target",
-    "aged_181_plus", "ais_qty_total", "aged_alert", "d7_avg", "doi_7d", "units_sparkline",
+    "days_until_order", "order_by", "order_status", "doi_flag",
+    "aged_181_plus", "ais_qty_total", "aged_alert", "d7_avg", "doi_7d",
     "trend", "trend_vs30", "trend_vs90", "action",
 ]
 _PD_COLS = [
@@ -114,14 +114,6 @@ def compute_derived(df: pd.DataFrame, target_doi: int, lead_time: int) -> pd.Dat
         lambda d: (date.today() + timedelta(days=int(d))).strftime("%b %d"))
     df["order_status"] = df["days_until_order"].apply(order_status_label)
     df["doi_flag"] = df["current_doi"].apply(lambda d: doi_flag(d, target_doi))
-    df["doi_pct_of_target"] = (df["current_doi"] / target_doi * 100).clip(upper=200).round()
-    # Streamlit's editable grid can't color a cell's text based on its value — this combines
-    # the color-coded flag, the number, AND the percent-of-target as visible text all in one
-    # column, since a separate flag column next to a plain number is the closest equivalent
-    # to "the number changes color," and the bar alone (see doi_pct_of_target) doesn't show
-    # its own number as text.
-    df["doi_display"] = (df["doi_flag"] + " " + df["current_doi"].astype(str) + "d ("
-                          + df["doi_pct_of_target"].astype(int).astype(str) + "%)")
     df["aged_181_plus"] = df["inv_age_181_270"] + df["inv_age_271_365"] + df["inv_age_365_plus"]
     df["ais_qty_total"] = (df.get("qty_ais_181_210", 0) + df.get("qty_ais_211_240", 0)
                             + df.get("qty_ais_241_270", 0) + df.get("qty_ais_271_300", 0)
@@ -136,14 +128,6 @@ def compute_derived(df: pd.DataFrame, target_doi: int, lead_time: int) -> pd.Dat
     # same idea as current_doi but using the fast/recent velocity instead of the blended average.
     df["doi_7d"] = df.apply(
         lambda r: round(r["fulfillable_plus_inbound"] / r["d7_avg"]) if r["d7_avg"] > 0 else None, axis=1)
-    # A compact visual trend across the four sales windows, shown as a mini bar chart in one
-    # cell (BarChartColumn) rather than stacked text — Streamlit's table can't wrap/stack text
-    # within a cell, but it does support a small chart per cell, which actually shows the trend
-    # direction better than four raw totals would anyway. Uses per-day rates so the four bars
-    # are on the same scale (a 90-day total is always bigger than a 7-day total on its own).
-    df["units_sparkline"] = df.apply(
-        lambda r: [round(r["units_7day"] / 7, 1), round(r["units_30day"] / 30, 1),
-                   round(r["units_60day"] / 60, 1), round(r["units_90day"] / 90, 1)], axis=1)
     trend_cols = df.apply(_trend_calc, axis=1)
     df = pd.concat([df, trend_cols], axis=1)
     df["action"] = df.apply(_action_text, axis=1)
