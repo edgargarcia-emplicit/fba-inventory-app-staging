@@ -1,5 +1,5 @@
 """
-FBA Inventory Sync — Streamlit edition
+FBA Inventory Sync — Streamlit edition update
 Full Python conversion of the WordPress plugin.
 """
 
@@ -89,66 +89,13 @@ def goto(page_name, brand_code=None, prefill_sku=None):
         st.session_state["prefill_sku"] = prefill_sku
 
 
-def render_dashboard_module(theme: str = "default"):
+def render_dashboard_module():
     """
     Renders the full inventory dashboard: KPI cards, the editable grid
     (Mock Units / Future DOI / Notes), filters, CSV export, and the SKU
     deep-dive section.
-
-    theme="default" — plain Streamlit look (the "Dashboard" page).
-    theme="branded" — same exact functionality, restyled to match the
-    Emplicit email digest's branding (dark header banner, accent-colored
-    buttons, card-style KPI metrics), used by "Inventory Report (Beta)".
-
-    Both pages call this same function so they can never drift apart —
-    the WordPress plugin's bug reports taught us what happens when the
-    same logic gets duplicated across files (see CHANGELOG.md).
-
-    Note: Streamlit's editable table widget can't render colored badge
-    pills inside individual cells the way the HTML digest table can — a
-    genuine platform limit, not a styling choice. Flag/Alerts/Trend/Status
-    still show as emoji/text either way; everything AROUND the grid
-    (header, KPI cards, buttons, section styling) is what changes between
-    themes.
     """
-    if theme == "branded":
-        st.markdown("""
-        <style>
-        div[data-testid="stMetric"] {
-            background: #ffffff; border: 1px solid #e5e7eb; border-radius: 8px;
-            padding: 12px 16px; box-shadow: 0 1px 2px rgba(0,0,0,0.04);
-        }
-        div[data-testid="stMetricValue"] { color: #e8404a; }
-        div[data-testid="stMetricLabel"] {
-            text-transform: uppercase; letter-spacing: .05em; font-size: 11px !important;
-        }
-        .stButton > button[kind="primary"], .stDownloadButton > button {
-            background-color: #e8404a; border-color: #e8404a; color: white;
-        }
-        div[data-testid="stExpander"] summary {
-            font-weight: 700; text-transform: uppercase; font-size: 12px; letter-spacing: .05em;
-            color: #1a1a2e;
-        }
-        h3, .stMarkdown h3 { color: #1a1a2e; }
-        </style>
-        """, unsafe_allow_html=True)
-        st.markdown(f"""
-        <div style="background:#0d1117;border-radius:12px 12px 0 0;padding:24px 32px">
-          <div style="color:#e8404a;font-size:11px;font-weight:600;letter-spacing:.08em;
-                      text-transform:uppercase;font-family:sans-serif">FBA Inventory Report</div>
-          <div style="color:#fff;font-size:26px;font-weight:700;margin-top:4px;
-                      font-family:sans-serif">{active['client_name']}</div>
-          <div style="color:#9ca3af;font-size:12px;margin-top:4px;font-family:sans-serif">
-            {active['brand_code']} · {active['marketplace']}</div>
-        </div>
-        <div style="background:#fff;border:1px solid #e5e7eb;border-top:none;
-                    border-radius:0 0 12px 12px;padding:12px 32px;margin-bottom:20px">
-          <span style="color:#6b7280;font-size:12px;font-family:sans-serif">
-            Fully editable — identical functionality to the Dashboard page, Emplicit-branded styling.</span>
-        </div>
-        """, unsafe_allow_html=True)
-    else:
-        st.header(f"{active['client_name']} — Inventory Dashboard")
+    st.header(f"{active['client_name']} — Inventory Dashboard")
 
     snapshot = inv["snapshot_date"].iloc[0] if len(inv) else ""
 
@@ -273,12 +220,13 @@ def render_dashboard_module(theme: str = "default"):
         daily_col = "pd_daily_avg"
     else:
         display_cols = {
-            "alerts": "Alerts", "doi_flag": "Flag", "trend": "Trend", "trend_vs30": "vs 30d %",
+            "alerts": "Alerts", "trend": "Trend", "trend_vs30": "vs 30d %",
             "trend_vs90": "vs 90d %", "title": "Title", "sku": "SKU", "asin": "ASIN",
             "fulfillable": "Fulfillable", "fulfillable_plus_inbound": "Fulf.+Inbound",
             "units_7day": "7d Units", "units_30day": "30d Units", "units_60day": "60d Units", "units_90day": "90d Units",
             "d7_avg": "7d Avg", "daily_avg": "Daily Avg",
-            "current_doi": "DOI", "order_by": "Order By", "order_status": "Status", "action": "Action",
+            "doi_display": "DOI", "doi_pct_of_target": "DOI %",
+            "order_by": "Order By", "order_status": "Status", "action": "Action",
             "order_units_calc": "Order Units", "order_cases_calc": "Order Cases",
             "inv_age_91_180": "91-180d", "inv_age_181_270": "181-270d", "aged_181_plus": "181d+",
             "ais_qty_total": "AIS Units", "pct_sales_mix": "% Mix", "synced": "Synced",
@@ -333,19 +281,60 @@ def render_dashboard_module(theme: str = "default"):
                    [_future_doi(i) for i in range(len(table))])
     edit_df["Note"] = note_col
 
+    # ---- Column order / width — Streamlit can't remember a live-dragged column resize or ----
+    # ---- reorder in the table itself, so this is an explicit settings panel that persists ----
+    # ---- instead. Computed here, now that every column (including Mock Units / Future DOI / ----
+    # ---- Note) actually exists on edit_df — anything left out of column_order gets hidden. ----
+    grid_prefs = store.get_grid_prefs(brand)
+    all_col_labels = list(edit_df.columns)
+    with st.expander("⚙️ Customize grid layout"):
+        st.caption("Streamlit's table can't remember a column you dragged wider or reordered directly in "
+                   "the grid — that resets every time the page reloads. Set your preferred order and width "
+                   "here instead and it'll persist across sessions.")
+        default_order = [c for c in (grid_prefs["column_order"] or all_col_labels) if c in all_col_labels]
+        chosen_order = st.multiselect("Column order (pick in the order you want, left to right)",
+                                       all_col_labels, default=default_order, key="grid_order_picker")
+        width_options = ["Compact", "Comfortable", "Wide"]
+        width_preset = st.selectbox("Column width", width_options,
+                                     index=width_options.index(grid_prefs["width_preset"])
+                                     if grid_prefs["width_preset"] in width_options else 1,
+                                     key="grid_width_picker")
+        if st.button("💾 Save layout"):
+            final_order = chosen_order + [c for c in all_col_labels if c not in chosen_order]
+            store.save_grid_prefs(brand, final_order, width_preset)
+            st.success("Layout saved — it'll be there next time you open this page.")
+            st.rerun()
+
+    saved_order = grid_prefs["column_order"]
+    column_order = None
+    if saved_order:
+        column_order = [c for c in saved_order if c in edit_df.columns]
+        column_order += [c for c in edit_df.columns if c not in column_order]
+
+    width_map = {"Compact": "small", "Comfortable": "medium", "Wide": "large"}
+    default_width = width_map.get(grid_prefs["width_preset"], "medium")
+
+    base_column_config = {c: st.column_config.Column(width=default_width) for c in edit_df.columns}
+    base_column_config.update({
+        "Daily Avg": st.column_config.NumberColumn(format="%.1f", width=default_width),
+        "7d Avg": st.column_config.NumberColumn(format="%.1f", width=default_width),
+        "% Mix": st.column_config.NumberColumn(format="%.1f%%", width=default_width),
+        "vs 30d %": st.column_config.NumberColumn(format="%d%%", width=default_width),
+        "vs 90d %": st.column_config.NumberColumn(format="%d%%", width=default_width),
+        "DOI %": st.column_config.ProgressColumn(
+            help="DOI as a percent of your target — 100% means right on target.",
+            format="%d%%", min_value=0, max_value=200, width=default_width),
+        "Mock Units": st.column_config.NumberColumn(
+            help="Type a hypothetical incoming quantity to see Future DOI update.", min_value=0, width=default_width),
+        "Future DOI": st.column_config.NumberColumn(
+            help="Projected DOI if the Mock Units quantity arrived today.", disabled=True, width=default_width),
+        "Note": st.column_config.TextColumn(width=default_width),
+    })
     result = st.data_editor(
         edit_df, use_container_width=True, hide_index=True, height=520, key=editor_key,
+        column_order=column_order,
         disabled=[c for c in edit_df.columns if c not in ("Mock Units", "Note")],
-        column_config={
-            "Daily Avg": st.column_config.NumberColumn(format="%.1f"),
-            "7d Avg": st.column_config.NumberColumn(format="%.1f"),
-            "% Mix": st.column_config.NumberColumn(format="%.1f%%"),
-            "vs 30d %": st.column_config.NumberColumn(format="%d%%"),
-            "vs 90d %": st.column_config.NumberColumn(format="%d%%"),
-            "Mock Units": st.column_config.NumberColumn(help="Type a hypothetical incoming quantity to see Future DOI update.", min_value=0),
-            "Future DOI": st.column_config.NumberColumn(help="Projected DOI if the Mock Units quantity arrived today.", disabled=True),
-            "Note": st.column_config.TextColumn(width="medium"),
-        },
+        column_config=base_column_config,
     )
 
     if st.button("💾 Save note changes"):
@@ -371,14 +360,13 @@ def render_dashboard_module(theme: str = "default"):
     st.download_button("⬇️ Export CSV", export.to_csv(index=False).encode("utf-8"),
                         file_name=f"{brand}_inventory_{mode_label}{date.today()}.csv", mime="text/csv")
 
-    # ---- SKU deep-dive: DOI history chart + quick shipment action ----
-    # (st.data_editor doesn't support click-to-select like st.dataframe did, so this is a
-    # selectbox instead of a row click — everything else above stays inline on the grid.)
-    st.divider()
-    st.subheader("🔎 SKU deep-dive")
-    dd_sku = st.selectbox("SKU", table["sku"].tolist(), key="deepdive_sku")
-    d1, d2 = st.columns([2, 1])
-    with d1:
+    # ---- SKU deep-dive: now a real popup (st.dialog), not an inline section ----
+    # (st.data_editor doesn't support click-to-select like st.dataframe did, so this is
+    # selectbox + button instead of a row click.)
+    @st.dialog("🔎 SKU Deep-Dive", width="large")
+    def _sku_deep_dive_dialog(dd_sku):
+        row = table[table["sku"] == dd_sku].iloc[0]
+        st.markdown(f"**{row['title']}** — `{dd_sku}`")
         days = st.radio("DOI history range", [30, 60, 90], horizontal=True, index=2, key=f"range_{dd_sku}")
         hist = doi_history.get_history_by_sku(brand, dd_sku, days)
         if hist.empty:
@@ -395,15 +383,20 @@ def render_dashboard_module(theme: str = "default"):
                 sc2.metric("Min / Max", f"{stats_box['min_doi']} / {stats_box['max_doi']}")
                 trend_val = stats_box["trend"]
                 sc3.metric("Trend", f"{'+' if trend_val >= 0 else ''}{trend_val}d", delta=trend_val)
-    with d2:
-        st.markdown("**Quick actions**")
+        st.divider()
         st.button("🚚 Log a shipment for this SKU", key=f"shipbtn_{dd_sku}",
                    on_click=goto, args=("Shipments", brand), kwargs={"prefill_sku": dd_sku})
+
+    st.divider()
+    dd1, dd2 = st.columns([3, 1])
+    dd_sku = dd1.selectbox("SKU", table["sku"].tolist(), key="deepdive_sku")
+    if dd2.button("🔎 View SKU details", use_container_width=True):
+        _sku_deep_dive_dialog(dd_sku)
 
 
 # =============================================================== sidebar
 clients = store.get_clients()
-PAGES = ["Overview", "Dashboard", "Inventory Report (Beta)", "Health Report", "Shipments", "Digest Preview", "Clients"]
+PAGES = ["Overview", "Dashboard", "Health Report", "Shipments", "Digest Preview", "Clients"]
 
 with st.sidebar:
     st.title("📦 FBA Inventory")
@@ -603,12 +596,6 @@ if page == "Digest Preview":
     st.stop()
 
 
-# =============================================================== INVENTORY REPORT (BETA)
-if page == "Inventory Report (Beta)":
-    render_dashboard_module(theme="branded")
-    st.stop()
-
-
 # =============================================================== HEALTH REPORT
 if page == "Health Report":
     st.header(f"🩺 Health Report — {active['client_name']}")
@@ -704,6 +691,47 @@ if page == "Shipments":
                 st.rerun()
 
     with tab2:
+        st.markdown("**Sync dimensions & case packs from the Google Sheet**")
+        st.caption("Pulls product weight/dimensions and a 'Master Carton' case pack for every SKU from a "
+                   "'SKU Sheet' tab in this client's spreadsheet. Doesn't touch any other custom case packs "
+                   "you've added below — only the one named exactly 'Master Carton'.")
+        sku_sheet_tab = st.text_input("SKU Sheet tab name", value="SKU Sheet", key="sku_sheet_tab_name")
+        if st.button("🔄 Sync Dimensions"):
+            try:
+                with st.spinner("Reading the SKU Sheet tab…"):
+                    dims_data = sheets.fetch_sku_sheet(active["sheet_id"], sku_sheet_tab)
+                if not dims_data:
+                    st.error(f"No data found in the '{sku_sheet_tab}' tab. Check that: (1) the tab is named "
+                             f"exactly '{sku_sheet_tab}', (2) it has a SKU column header, and (3) the sheet "
+                             f"is shared with the service account.")
+                else:
+                    size_tier_map = {}
+                    if "size_tier" in inv.columns:
+                        for _, r in inv.iterrows():
+                            if r.get("size_tier"):
+                                size_tier_map[r["sku"]] = r["size_tier"]
+
+                    count = 0
+                    for sku_val, data in dims_data.items():
+                        size_tier = size_tier_map.get(sku_val, "")
+                        store.save_sku_dimension(brand, sku_val, data["weight_lb"], data["longest_side"],
+                                                  data["median_side"], data["shortest_side"],
+                                                  data["units_per_case"], size_tier)
+                        has_cp_data = (data["units_per_case"] > 0 or data["cp_weight_lb"] > 0
+                                       or data["cp_longest_side"] > 0)
+                        if has_cp_data:
+                            existing_id = store.get_case_pack_id_by_name(brand, sku_val, "Master Carton")
+                            store.save_case_pack(brand, sku_val, "Master Carton", data["units_per_case"],
+                                                  data["cp_longest_side"], data["cp_median_side"],
+                                                  data["cp_shortest_side"], data["cp_weight_lb"],
+                                                  pack_id=existing_id)
+                        count += 1
+                    st.success(f"Synced dimensions for {count} SKU(s).")
+                    st.rerun()
+            except ValueError as e:
+                st.error(str(e))
+
+        st.divider()
         sku = st.selectbox("SKU", active_inv["sku"].tolist(), key="dims_sku")
         dims = store.get_sku_dimensions(brand, sku) or {}
         with st.form("dims_form"):
@@ -752,8 +780,17 @@ if page == "Shipments":
             row = active_inv[active_inv["sku"] == s].iloc[0]
             dims = store.get_sku_dimensions(brand, s) or {}
             packs = store.get_case_packs(brand, s)
-            pack_name = packs.iloc[0]["pack_name"] if not packs.empty else ""
-            upc = int(float(packs.iloc[0]["units"])) if not packs.empty else int(dims.get("units_per_case", 0) or 0)
+            if not packs.empty:
+                pack_choice = st.selectbox(f"Case pack — {s} ({row['title'][:30]})",
+                                            packs["pack_name"].tolist(), key=f"packchoice_{s}")
+                chosen = packs[packs["pack_name"] == pack_choice].iloc[0]
+                pack_name = chosen["pack_name"]
+                upc = int(float(chosen["units"])) if float(chosen["units"]) > 0 else int(dims.get("units_per_case", 0) or 0)
+                pack_l, pack_w, pack_h, pack_wt = chosen["length_in"], chosen["width_in"], chosen["height_in"], chosen["weight_lb"]
+            else:
+                pack_name = ""
+                upc = int(dims.get("units_per_case", 0) or 0)
+                pack_l = pack_w = pack_h = pack_wt = ""
             units = st.number_input(f"Units — {s} ({row['title'][:40]})", min_value=0,
                                      value=int(row.get("order_units_calc", 0)) if "order_units_calc" in row else 0,
                                      key=f"buildunits_{s}")
@@ -761,8 +798,9 @@ if page == "Shipments":
             line_items.append({
                 "SKU": s, "Title": row["title"], "Units": units, "Case Pack": pack_name,
                 "Units/Case": upc, "Cases": cases,
-                "Length (in)": dims.get("longest_side", ""), "Width (in)": dims.get("median_side", ""),
-                "Height (in)": dims.get("shortest_side", ""), "Weight (lb)": dims.get("weight_lb", ""),
+                "Case Length (in)": pack_l, "Case Width (in)": pack_w,
+                "Case Height (in)": pack_h, "Case Weight (lb)": pack_wt,
+                "Product Weight (lb)": dims.get("weight_lb", ""),
             })
 
         if line_items:
@@ -785,4 +823,4 @@ if page == "Shipments":
 
 
 # =============================================================== DASHBOARD
-render_dashboard_module(theme="default")
+render_dashboard_module()
