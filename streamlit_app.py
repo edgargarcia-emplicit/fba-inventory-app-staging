@@ -1,6 +1,6 @@
 """
-FBA Inventory Sync — Streamlit edition update
-Full Python conversion of the WordPress plugin.
+FBA Inventory Sync — Streamlit edition
+Full Python conversion for the WordPress plugin.
 """
 
 import io
@@ -208,14 +208,13 @@ def render_dashboard_module():
     # ---- Main table: one wide, dense grid, with Mock Units / Future DOI / Note editable inline ----
     if mode == "prime_day":
         display_cols = {
-            "alerts": "Alerts", "doi_flag": "Flag", "trend": "Trend", "trend_vs30": "vs 30d %",
+            "alerts": "Alerts", "trend": "Trend", "trend_vs30": "vs 30d %",
             "trend_vs90": "vs 90d %", "title": "Title", "sku": "SKU",
             "fulfillable": "Fulfillable", "fulfillable_plus_inbound": "Fulf.+Inbound",
             "daily_avg": "Daily Avg", "pd_multiplier": "PD Mult.", "pd_daily_avg": "PD Daily Avg",
             "pd_doi_event": "PD DOI (event)", "pd_units_to_order": "PD Order Units",
             "pd_cases_to_order": "PD Order Cases", "pd_status": "PD Status",
-            "inv_age_91_180": "91-180d", "inv_age_181_270": "181-270d", "aged_181_plus": "181d+",
-            "ais_qty_total": "AIS Units", "synced": "Synced",
+            "aged_alert": "Aged", "synced": "Synced",
         }
         daily_col = "pd_daily_avg"
     else:
@@ -223,13 +222,11 @@ def render_dashboard_module():
             "alerts": "Alerts", "trend": "Trend", "trend_vs30": "vs 30d %",
             "trend_vs90": "vs 90d %", "title": "Title", "sku": "SKU", "asin": "ASIN",
             "fulfillable": "Fulfillable", "fulfillable_plus_inbound": "Fulf.+Inbound",
-            "units_7day": "7d Units", "units_30day": "30d Units", "units_60day": "60d Units", "units_90day": "90d Units",
-            "d7_avg": "7d Avg", "daily_avg": "Daily Avg",
+            "units_sparkline": "Units Trend", "doi_7d": "7d DOI", "daily_avg": "Daily Avg",
             "doi_display": "DOI", "doi_pct_of_target": "DOI %",
             "order_by": "Order By", "order_status": "Status", "action": "Action",
             "order_units_calc": "Order Units", "order_cases_calc": "Order Cases",
-            "inv_age_91_180": "91-180d", "inv_age_181_270": "181-270d", "aged_181_plus": "181d+",
-            "ais_qty_total": "AIS Units", "pct_sales_mix": "% Mix", "synced": "Synced",
+            "aged_alert": "Aged", "pct_sales_mix": "% Mix", "synced": "Synced",
         }
         daily_col = "daily_avg"
 
@@ -317,12 +314,19 @@ def render_dashboard_module():
     base_column_config = {c: st.column_config.Column(width=default_width) for c in edit_df.columns}
     base_column_config.update({
         "Daily Avg": st.column_config.NumberColumn(format="%.1f", width=default_width),
-        "7d Avg": st.column_config.NumberColumn(format="%.1f", width=default_width),
+        "7d DOI": st.column_config.NumberColumn(
+            help="Projected DOI if the last 7 days' sell-through rate continues.", width=default_width),
+        "Units Trend": st.column_config.BarChartColumn(
+            help="Daily sell-through rate over the last 7/30/60/90 days, left to right — "
+                 "shows whether velocity is speeding up or slowing down.",
+            y_min=0, width=default_width),
         "% Mix": st.column_config.NumberColumn(format="%.1f%%", width=default_width),
         "vs 30d %": st.column_config.NumberColumn(format="%d%%", width=default_width),
         "vs 90d %": st.column_config.NumberColumn(format="%d%%", width=default_width),
         "DOI %": st.column_config.ProgressColumn(
-            help="DOI as a percent of your target — 100% means right on target.",
+            help="DOI as a percent of target (also shown as text in the DOI column). "
+                 "Streamlit can't color this bar per row based on its value — the DOI column's "
+                 "🟢/🟡/🔴 flag right next to it is the actual color-coded signal.",
             format="%d%%", min_value=0, max_value=200, width=default_width),
         "Mock Units": st.column_config.NumberColumn(
             help="Type a hypothetical incoming quantity to see Future DOI update.", min_value=0, width=default_width),
@@ -360,22 +364,45 @@ def render_dashboard_module():
     st.download_button("⬇️ Export CSV", export.to_csv(index=False).encode("utf-8"),
                         file_name=f"{brand}_inventory_{mode_label}{date.today()}.csv", mime="text/csv")
 
-    # ---- SKU deep-dive: now a real popup (st.dialog), not an inline section ----
-    # (st.data_editor doesn't support click-to-select like st.dataframe did, so this is
-    # selectbox + button instead of a row click.)
+    # ---- Aged Inventory — its own table, separate from the main grid ----
+    aged = calc.aged_summary(derived if mode != "prime_day" else calc.compute_derived(active_inv, target_doi, lead_time))
+    st.divider()
+    st.subheader(f"⚠️ Aged Inventory{f' ({len(aged)})' if not aged.empty else ''}")
+    if aged.empty:
+        st.caption("No aged inventory (91+ days) or AIS-fee-triggering quantity right now.")
+    else:
+        aged_view = aged[["title", "sku", "inv_age_91_180", "inv_age_181_270", "inv_age_271_365",
+                           "inv_age_365_plus", "ais_qty_total"]].rename(columns={
+            "title": "Title", "sku": "SKU", "inv_age_91_180": "91-180d", "inv_age_181_270": "181-270d",
+            "inv_age_271_365": "271-365d", "inv_age_365_plus": "365d+", "ais_qty_total": "AIS Units",
+        })
+        st.dataframe(aged_view, use_container_width=True, hide_index=True)
+
+    # ---- SKU deep-dive: a real popup (st.dialog) ----
+    # Honest limitation: Streamlit's editable grid has no click-to-select the way a
+    # read-only table does — that interaction isn't exposed by data_editor at all, so this
+    # stays selectbox + button rather than clicking the row/SKU directly.
     @st.dialog("🔎 SKU Deep-Dive", width="large")
     def _sku_deep_dive_dialog(dd_sku):
         row = table[table["sku"] == dd_sku].iloc[0]
         st.markdown(f"**{row['title']}** — `{dd_sku}`")
-        days = st.radio("DOI history range", [30, 60, 90], horizontal=True, index=2, key=f"range_{dd_sku}")
+        days = st.radio("History range", [30, 60, 90], horizontal=True, index=2, key=f"range_{dd_sku}")
         hist = doi_history.get_history_by_sku(brand, dd_sku, days)
         if hist.empty:
             st.info("No history yet for this SKU — a snapshot is saved automatically once per day; "
                      "check back tomorrow to start seeing a trend.")
         else:
-            chart_df = hist.set_index("snapshot_date")[["doi", "future_doi"]]
-            chart_df.columns = ["Current DOI", "Future DOI"]
-            st.line_chart(chart_df)
+            c1, c2 = st.columns(2)
+            with c1:
+                st.caption("DOI over time")
+                doi_chart_df = hist.set_index("snapshot_date")[["doi", "future_doi"]]
+                doi_chart_df.columns = ["Current DOI", "Future DOI"]
+                st.line_chart(doi_chart_df)
+            with c2:
+                st.caption("Daily average units sold")
+                avg_chart_df = hist.set_index("snapshot_date")[["daily_avg"]]
+                avg_chart_df.columns = ["Daily Avg Units Sold"]
+                st.line_chart(avg_chart_df)
             stats_box = doi_history.sku_stats(hist)
             if stats_box:
                 sc1, sc2, sc3 = st.columns(3)
@@ -383,6 +410,41 @@ def render_dashboard_module():
                 sc2.metric("Min / Max", f"{stats_box['min_doi']} / {stats_box['max_doi']}")
                 trend_val = stats_box["trend"]
                 sc3.metric("Trend", f"{'+' if trend_val >= 0 else ''}{trend_val}d", delta=trend_val)
+
+        st.divider()
+        st.caption("Dimensions & case packs")
+        dims = store.get_sku_dimensions(brand, dd_sku) or {}
+        d1, d2, d3, d4 = st.columns(4)
+        d1.metric("Weight (lb)", dims.get("weight_lb", "—") or "—")
+        d2.metric("Longest (in)", dims.get("longest_side", "—") or "—")
+        d3.metric("Median (in)", dims.get("median_side", "—") or "—")
+        d4.metric("Shortest (in)", dims.get("shortest_side", "—") or "—")
+
+        packs = store.get_case_packs(brand, dd_sku)
+        if not packs.empty:
+            st.dataframe(packs.drop(columns=["id", "brand_code", "sku"]),
+                         use_container_width=True, hide_index=True)
+        else:
+            st.caption("No case packs saved yet for this SKU.")
+
+        with st.form(f"add_pack_{dd_sku}"):
+            st.caption("Add a case pack")
+            p1, p2, p3, p4 = st.columns(4)
+            pack_name = p1.text_input("Pack name", placeholder="e.g. Case of 24")
+            p_units = p2.number_input("Units", min_value=1, value=24)
+            p_wt = p3.number_input("Weight (lb)", min_value=0.0, value=0.0)
+            p_l = p4.number_input("Length (in)", min_value=0.0, value=0.0)
+            p5, p6 = st.columns(2)
+            p_w = p5.number_input("Width (in)", min_value=0.0, value=0.0)
+            p_h = p6.number_input("Height (in)", min_value=0.0, value=0.0)
+            if st.form_submit_button("Add case pack"):
+                if pack_name.strip():
+                    store.save_case_pack(brand, dd_sku, pack_name.strip(), p_units, p_l, p_w, p_h, p_wt)
+                    st.toast(f"Added case pack '{pack_name}'.")
+                    st.rerun()
+                else:
+                    st.error("Give the case pack a name first.")
+
         st.divider()
         st.button("🚚 Log a shipment for this SKU", key=f"shipbtn_{dd_sku}",
                    on_click=goto, args=("Shipments", brand), kwargs={"prefill_sku": dd_sku})
