@@ -1,6 +1,6 @@
 """
 FBA Inventory Sync — Streamlit edition
-Full Python conversion for the WordPress plugin.
+Full Python conversion of the WordPress plugins.
 """
 
 import io
@@ -209,8 +209,11 @@ def render_dashboard_module():
     if mode == "prime_day":
         display_cols = {
             "alerts": "Alerts", "trend": "Trend", "trend_vs30": "vs 30d %",
-            "trend_vs90": "vs 90d %", "title": "Title", "sku": "SKU",
-            "fulfillable": "Fulfillable", "fulfillable_plus_inbound": "Fulf.+Inbound",
+            "trend_vs90": "vs 90d %", "title": "Title", "sku": "SKU", "asin": "ASIN",
+            "fulfillable": "Fulfillable",
+            "inbound_working": "Inbound: Working", "inbound_shipped": "Inbound: Shipped",
+            "inbound_receiving": "Inbound: Receiving", "fc_transfer": "Inbound: FC Transfer",
+            "fc_processing": "Inbound: FC Processing", "fulfillable_plus_inbound": "Fulf.+Inbound",
             "daily_avg": "Daily Avg", "pd_multiplier": "PD Mult.", "pd_daily_avg": "PD Daily Avg",
             "pd_doi_event": "PD DOI (event)", "pd_units_to_order": "PD Order Units",
             "pd_cases_to_order": "PD Order Cases", "pd_status": "PD Status",
@@ -219,11 +222,16 @@ def render_dashboard_module():
         daily_col = "pd_daily_avg"
     else:
         display_cols = {
-            "alerts": "Alerts", "trend": "Trend", "trend_vs30": "vs 30d %",
-            "trend_vs90": "vs 90d %", "title": "Title", "sku": "SKU", "asin": "ASIN",
-            "fulfillable": "Fulfillable", "fulfillable_plus_inbound": "Fulf.+Inbound",
-            "units_sparkline": "Units Trend", "doi_7d": "7d DOI", "daily_avg": "Daily Avg",
-            "doi_display": "DOI", "doi_pct_of_target": "DOI %",
+            "alerts": "Alerts", "doi_flag": "Flag", "current_doi": "DOI",
+            "trend": "Trend", "trend_vs30": "vs 30d %", "trend_vs90": "vs 90d %",
+            "title": "Title", "sku": "SKU", "asin": "ASIN",
+            "fulfillable": "Fulfillable",
+            "inbound_working": "Inbound: Working", "inbound_shipped": "Inbound: Shipped",
+            "inbound_receiving": "Inbound: Receiving", "fc_transfer": "Inbound: FC Transfer",
+            "fc_processing": "Inbound: FC Processing", "fulfillable_plus_inbound": "Fulf.+Inbound",
+            "units_7day": "Sales: 7d Units", "units_30day": "Sales: 30d Units",
+            "units_60day": "Sales: 60d Units", "units_90day": "Sales: 90d Units",
+            "doi_7d": "7d DOI", "daily_avg": "Daily Avg",
             "order_by": "Order By", "order_status": "Status", "action": "Action",
             "order_units_calc": "Order Units", "order_cases_calc": "Order Cases",
             "aged_alert": "Aged", "pct_sales_mix": "% Mix", "synced": "Synced",
@@ -231,6 +239,12 @@ def render_dashboard_module():
         daily_col = "daily_avg"
 
     edit_df = safe_view(table, display_cols)
+    edit_df.insert(0, "🔎", [False] * len(table))
+    st.caption("Streamlit's table doesn't support grouped/multi-row column headers (checked directly — "
+               "no such option exists), so related columns are named with a shared prefix instead "
+               "(e.g. 'Inbound: Working', 'Sales: 7d Units') and kept next to each other.")
+
+
     editor_key = f"main_editor_{brand}_{mode}_{show_inactive}_{hash(search)}"
 
     # Mock Units and Note are tracked in our OWN persistent session_state dicts, keyed by SKU,
@@ -247,6 +261,7 @@ def render_dashboard_module():
     # dataframe below anyway, so doing it inline here is simpler and (per direct testing) more
     # reliably triggered than a callback.
     _edited_now = st.session_state.get(editor_key, {}).get("edited_rows", {})
+    _view_trigger_sku = None
     for _pos_str, _changes in _edited_now.items():
         _pos = int(_pos_str)
         if _pos >= len(table):
@@ -256,6 +271,8 @@ def render_dashboard_module():
             mock_store[_sku_val] = _changes["Mock Units"]
         if "Note" in _changes:
             pending_notes[_sku_val] = _changes["Note"]
+        if _changes.get("🔎") is True:
+            _view_trigger_sku = _sku_val
 
 
     mock_units_col = [mock_store.get(sku, 0) for sku in table["sku"]]
@@ -313,21 +330,19 @@ def render_dashboard_module():
 
     base_column_config = {c: st.column_config.Column(width=default_width) for c in edit_df.columns}
     base_column_config.update({
+        "🔎": st.column_config.CheckboxColumn(
+            help="Check to open this SKU's details popup.", width="small"),
         "Daily Avg": st.column_config.NumberColumn(format="%.1f", width=default_width),
         "7d DOI": st.column_config.NumberColumn(
             help="Projected DOI if the last 7 days' sell-through rate continues.", width=default_width),
-        "Units Trend": st.column_config.BarChartColumn(
-            help="Daily sell-through rate over the last 7/30/60/90 days, left to right — "
-                 "shows whether velocity is speeding up or slowing down.",
-            y_min=0, width=default_width),
         "% Mix": st.column_config.NumberColumn(format="%.1f%%", width=default_width),
         "vs 30d %": st.column_config.NumberColumn(format="%d%%", width=default_width),
         "vs 90d %": st.column_config.NumberColumn(format="%d%%", width=default_width),
-        "DOI %": st.column_config.ProgressColumn(
-            help="DOI as a percent of target (also shown as text in the DOI column). "
-                 "Streamlit can't color this bar per row based on its value — the DOI column's "
-                 "🟢/🟡/🔴 flag right next to it is the actual color-coded signal.",
-            format="%d%%", min_value=0, max_value=200, width=default_width),
+        "DOI": st.column_config.ProgressColumn(
+            help="Current DOI, with a bar showing it relative to your target (100% of the "
+                 "bar = 2x target). The Flag column's 🟢/🟡/🔴 is the color-coded signal — "
+                 "Streamlit can't color this bar itself based on its value.",
+            format="%dd", min_value=0, max_value=max(int(target_doi) * 2, 1), width=default_width),
         "Mock Units": st.column_config.NumberColumn(
             help="Type a hypothetical incoming quantity to see Future DOI update.", min_value=0, width=default_width),
         "Future DOI": st.column_config.NumberColumn(
@@ -337,7 +352,7 @@ def render_dashboard_module():
     result = st.data_editor(
         edit_df, use_container_width=True, hide_index=True, height=520, key=editor_key,
         column_order=column_order,
-        disabled=[c for c in edit_df.columns if c not in ("Mock Units", "Note")],
+        disabled=[c for c in edit_df.columns if c not in ("Mock Units", "Note", "🔎")],
         column_config=base_column_config,
     )
 
@@ -449,11 +464,9 @@ def render_dashboard_module():
         st.button("🚚 Log a shipment for this SKU", key=f"shipbtn_{dd_sku}",
                    on_click=goto, args=("Shipments", brand), kwargs={"prefill_sku": dd_sku})
 
-    st.divider()
-    dd1, dd2 = st.columns([3, 1])
-    dd_sku = dd1.selectbox("SKU", table["sku"].tolist(), key="deepdive_sku")
-    if dd2.button("🔎 View SKU details", use_container_width=True):
-        _sku_deep_dive_dialog(dd_sku)
+    st.caption("🔎 Check the box on any row above to open that SKU's details popup.")
+    if _view_trigger_sku:
+        _sku_deep_dive_dialog(_view_trigger_sku)
 
 
 # =============================================================== sidebar
