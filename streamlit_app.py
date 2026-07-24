@@ -1,6 +1,6 @@
 """
 FBA Inventory Sync — Streamlit edition
-Full Python conversion of the WordPress plugins.
+Full Python conversion of the WordPress pluginz.
 """
 
 import io
@@ -240,9 +240,10 @@ def render_dashboard_module():
 
     edit_df = safe_view(table, display_cols)
     edit_df.insert(0, "🔎", [False] * len(table))
-    st.caption("Streamlit's table doesn't support grouped/multi-row column headers (checked directly — "
-               "no such option exists), so related columns are named with a shared prefix instead "
-               "(e.g. 'Inbound: Working', 'Sales: 7d Units') and kept next to each other.")
+    st.caption("Streamlit's table has no real merged/spanning header row (checked directly in its "
+               "source — no such feature exists), so the bold labels above are a best-effort "
+               "approximation built from st.columns(), not a true grouped header cell. It should stay "
+               "reasonably aligned, including if you reorder columns below, but isn't pixel-perfect.")
 
 
     editor_key = f"main_editor_{brand}_{mode}_{show_inactive}_{hash(search)}"
@@ -349,6 +350,43 @@ def render_dashboard_module():
             help="Projected DOI if the Mock Units quantity arrived today.", disabled=True, width=default_width),
         "Note": st.column_config.TextColumn(width=default_width),
     })
+    # ---- Best-effort grouped header strip ----
+    # Streamlit's table has no real merged/spanning header row (checked directly in its
+    # source — no such feature exists), so this fakes one: a row of st.columns() sized by
+    # how many grid columns each group spans, placed right above the table. Since every
+    # column below uses the same width preset, count-based proportions line up reasonably
+    # well — not pixel-perfect (no horizontal-scroll awareness, and very long/short window
+    # widths can drift it slightly), but close, and it recomputes if you reorder columns
+    # in "Customize grid layout" above.
+    GROUP_MAP = {
+        "🔎": "", "Alerts": "Status", "Aged": "Status",
+        "Flag": "DOI", "DOI": "DOI", "Mock Units": "What-If", "Future DOI": "What-If", "7d DOI": "DOI",
+        "Trend": "Trend", "vs 30d %": "Trend", "vs 90d %": "Trend",
+        "Title": "Item", "SKU": "Item", "ASIN": "Item",
+        "Fulfillable": "Inventory", "Fulf.+Inbound": "Inventory",
+        "Inbound: Working": "Inbound", "Inbound: Shipped": "Inbound", "Inbound: Receiving": "Inbound",
+        "Inbound: FC Transfer": "Inbound", "Inbound: FC Processing": "Inbound",
+        "Sales: 7d Units": "Sales", "Sales: 30d Units": "Sales", "Sales: 60d Units": "Sales",
+        "Sales: 90d Units": "Sales", "Daily Avg": "Sales", "% Mix": "Sales",
+        "Order By": "Replenishment", "Status": "Replenishment", "Action": "Replenishment",
+        "Order Units": "Replenishment", "Order Cases": "Replenishment",
+        "PD Mult.": "Prime Day", "PD Daily Avg": "Prime Day", "PD DOI (event)": "Prime Day",
+        "PD Order Units": "Prime Day", "PD Order Cases": "Prime Day", "PD Status": "Prime Day",
+        "Synced": "", "Note": "",
+    }
+    visible_order = column_order if column_order else list(edit_df.columns)
+    segments = []  # list of [group_label, column_count]
+    for col in visible_order:
+        label = GROUP_MAP.get(col, "")
+        if segments and segments[-1][0] == label:
+            segments[-1][1] += 1
+        else:
+            segments.append([label, 1])
+    header_cols = st.columns([count for _, count in segments])
+    for hc, (label, _count) in zip(header_cols, segments):
+        if label:
+            hc.markdown(f"**{label}**")
+
     result = st.data_editor(
         edit_df, use_container_width=True, hide_index=True, height=520, key=editor_key,
         column_order=column_order,
