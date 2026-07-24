@@ -47,6 +47,7 @@ TABS = {
     "last_checked":       ["brand_code", "checked_at", "checked_by"],
     "ignored_alerts":     ["key"],
     "digest_recipients":  ["email"],
+    "grid_prefs":         ["brand_code", "column_order_json", "width_preset"],
 }
 
 
@@ -251,6 +252,12 @@ def save_case_pack(brand_code, sku, pack_name, units, length_in, width_in, heigh
     _write_tab("case_packs", pd.concat([df, row], ignore_index=True))
 
 
+def get_case_pack_id_by_name(brand_code, sku, pack_name):
+    df = read_tab("case_packs")
+    match = df[(df["brand_code"] == brand_code) & (df["sku"] == sku) & (df["pack_name"] == pack_name)]
+    return match.iloc[0]["id"] if not match.empty else None
+
+
 def delete_case_pack(pack_id):
     df = read_tab("case_packs")
     _write_tab("case_packs", df[df["id"] != str(pack_id)])
@@ -349,3 +356,27 @@ def get_digest_recipients() -> list:
 def save_digest_recipients(emails: list):
     df = pd.DataFrame([{"email": e.strip()} for e in emails if e.strip()])
     _write_tab("digest_recipients", df)
+
+
+# ============================================================== grid layout
+def get_grid_prefs(brand_code) -> dict:
+    df = read_tab("grid_prefs")
+    row = df[df["brand_code"] == brand_code]
+    if row.empty:
+        return {"column_order": None, "width_preset": "Comfortable"}
+    r = row.iloc[0]
+    import json
+    try:
+        order = json.loads(r["column_order_json"]) if r["column_order_json"] else None
+    except (ValueError, TypeError):
+        order = None
+    return {"column_order": order, "width_preset": r["width_preset"] or "Comfortable"}
+
+
+def save_grid_prefs(brand_code, column_order: list, width_preset: str):
+    import json
+    df = read_tab("grid_prefs")
+    df = df[df["brand_code"] != brand_code]
+    row = pd.DataFrame([{"brand_code": brand_code, "column_order_json": json.dumps(column_order),
+                          "width_preset": width_preset}])
+    _write_tab("grid_prefs", pd.concat([df, row], ignore_index=True))
