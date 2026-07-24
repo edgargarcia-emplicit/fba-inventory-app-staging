@@ -171,3 +171,112 @@ def fetch_inventory(sheet_id: str, tab_name: str) -> pd.DataFrame:
 
 def clear_inventory_cache():
     fetch_inventory.clear()
+
+
+def _to_float_dim(v):
+    try:
+        return float(str(v).replace(",", "").strip() or 0)
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def _to_int_dim(v):
+    try:
+        return int(float(str(v).replace(",", "").strip() or 0))
+    except (ValueError, TypeError):
+        return 0
+
+
+def fetch_sku_sheet(sheet_id: str, tab_name: str = "SKU Sheet") -> dict:
+    """
+    Reads the "SKU Sheet" tab (same spreadsheet as the Ordering Template) for
+    per-SKU product dimensions and case pack ("Master Carton") sizing.
+    Ported from class-fba-sheets-api.php's fetch_sku_sheet().
+
+    "Longest side" / "Median side" / "Shortest side" each appear TWICE in
+    this sheet — the first occurrence is the product's own dimensions, the
+    second is the master carton (case pack) dimensions.
+
+    Returns {sku: {weight_lb, longest_side, median_side, shortest_side,
+                   units_per_case, cp_weight_lb, cp_longest_side,
+                   cp_median_side, cp_shortest_side}}
+    """
+    service = _sheets_service()
+    tab_ref = f"'{tab_name}'" if " " in tab_name else tab_name
+    try:
+        result = (
+            service.spreadsheets().values()
+            .get(spreadsheetId=sheet_id, range=f"{tab_ref}!A1:AQ500")
+            .execute()
+        )
+    except Exception as e:  # noqa: BLE001
+        raise ValueError(f"Could not read the '{tab_name}' tab: {e}")
+
+    rows = result.get("values", [])
+    if len(rows) < 2:
+        return {}
+
+    sku_candidates = ["amazon sku", "sku", "merchant sku", "seller sku", "asin"]
+    header_row_idx = 0
+    for idx, row in enumerate(rows):
+        normalized = [str(h or "").strip().lower() for h in row]
+        if any(c in normalized for c in sku_candidates):
+            header_row_idx = idx
+            break
+
+    headers = [str(h or "").strip().lower() for h in rows[header_row_idx]]
+
+    def col(candidates):
+        for c in candidates:
+            c = c.strip().lower()
+            if c in headers:
+                return headers.index(c)
+        return None
+
+    def col_all(candidates):
+        cands = [c.strip().lower() for c in candidates]
+        return [i for i, h in enumerate(headers) if h in cands]
+
+    sku_col = col(["amazon sku", "sku", "merchant sku", "seller sku"])
+    weight_col = col(["product weight (lb)", "product weight lb", "weight lb", "weight (lb)",
+                      "product weight (lbs)", "weight (lbs)"])
+    longest_cols = col_all(["longest side", "longest side "])
+    median_cols = col_all(["median side", "median side "])
+    shortest_cols = col_all(["shortest side", "shortest side "])
+    longest_col = longest_cols[0] if longest_cols else None
+    median_col = median_cols[0] if median_cols else None
+    shortest_col = shortest_cols[0] if shortest_cols else None
+
+    upc_col = col(["unit count per case/ box/ pallet", "unit count per case/box/pallet",
+                   "unit count per case box pallet", "unit count per case",
+                   "units per case box pallet", "units per case", "units per case/ box/ pallet"])
+    cp_weight_col = col(["master carton / pallet weight (lbs)", "master carton/pallet weight (lbs)",
+                         "carton weight (lbs)", "case weight (lbs)", "case weight lb"])
+    cp_longest_col = longest_cols[1] if len(longest_cols) > 1 else None
+    cp_median_col = median_cols[1] if len(median_cols) > 1 else None
+    cp_shortest_col = shortest_cols[1] if len(shortest_cols) > 1 else None
+
+    if sku_col is None:
+        return {}
+
+    def cell(row, idx):
+        return row[idx] if idx is not None and idx < len(row) else ""
+
+    results = {}
+    for row in rows[header_row_idx + 1:]:
+        sku = str(cell(row, sku_col) or "").strip()
+        if not sku:
+            continue
+        results[sku] = {
+            "sku": sku,
+            "weight_lb": _to_float_dim(cell(row, weight_col)),
+            "longest_side": _to_float_dim(cell(row, longest_col)),
+            "median_side": _to_float_dim(cell(row, median_col)),
+            "shortest_side": _to_float_dim(cell(row, shortest_col)),
+            "units_per_case": _to_int_dim(cell(row, upc_col)),
+            "cp_weight_lb": _to_float_dim(cell(row, cp_weight_col)),
+            "cp_longest_side": _to_float_dim(cell(row, cp_longest_col)),
+            "cp_median_side": _to_float_dim(cell(row, cp_median_col)),
+            "cp_shortest_side": _to_float_dim(cell(row, cp_shortest_col)),
+        }
+    return results
