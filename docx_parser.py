@@ -37,20 +37,6 @@ SECTION_KEYWORDS = [
     "ENHANCED BRAND", "EBC",
 ]
 
-DESC_HEADERS = [
-    "BACKEND DESCRIPTION", "PRODUCT DESCRIPTION", "A+ DESCRIPTION", "A+ CONTENT",
-    "DESCRIPTION / ENHANCED", "ENHANCED BRAND CONTENT", "EBC", "BRAND CONTENT",
-]
-DESC_STOP_HEADERS = ["SEO", "BACKEND SEARCH", "METADATA", "ALT TEXT", "HIGH-VALUE",
-                     "BULLET", "TITLE", "ADS HEADLINE", "THUMBNAILS", "LISTING IMAGE",
-                     "ONE MORE THING"]
-DESC_BOILERPLATE = [
-    "PLEASE NOTE", "THE COPY BELOW WILL ONLY APPEAR", "THE COPY BELOW IS FOR",
-    "FOR BRANDS WITH AN EBC", "THE DESIGNER WILL ADD", "THE MODULE SEQUENCE",
-    "MODULE SEQUENCE MAY VARY", "BASED ON THE GRAPHIC", "GRAPHIC DESIGNER",
-    "LINK TO COPY DOC", "COMPARISON CHART",
-]
-
 SEO_HEADERS = ["SEO", "BACKEND SEARCH TERMS", "BACKEND SEARCH"]
 SEO_MARKERS = ["BACKEND SEARCH TERMS", "BACKEND SEARCH", "MAX. 250", "MAX. 500",
                "MAX. 1000", "PLEASE NOTE", "THE FOLLOWING KEYWORDS",
@@ -245,34 +231,32 @@ def _parse_bullets(lines: list[str]) -> list[dict]:
 
 
 def _parse_description(lines: list[str]) -> str:
-    in_desc = False
+    """
+    The real product description lives in the table cell labeled exactly
+    "Brand Description" (under the BRAND DESCRIPTION / BACKEND DESCRIPTION
+    headers) — not the EBC/A+ module content, which is separate marketing
+    copy for the designer, not the description field itself. The value can
+    span several paragraphs within that one cell, so this collects every
+    line after the label until end-of-document or the closing boilerplate.
+    """
+    label_idx = None
+    for i, line in enumerate(lines):
+        if line.strip().lower() == "brand description":
+            label_idx = i  # keep the LAST match — the section header "BRAND DESCRIPTION"
+                           # appears earlier and lowercases to the same string as the
+                           # actual table label that follows it, so take the final one
+
+    if label_idx is None:
+        return ""
+
+    stop_markers = ("ONE MORE THING", "PLEASE LEAVE US A COMMENT")
     parts = []
-    for line in lines:
+    for line in lines[label_idx + 1:]:
         upper = line.upper()
-        entered = False
-        for kw in DESC_HEADERS:
-            if kw in upper:
-                in_desc = True
-                entered = True
-                break
-        if entered:
-            continue
-        if in_desc:
-            for kw in DESC_STOP_HEADERS:
-                if kw in upper:
-                    in_desc = False
-                    break
-        if not in_desc:
-            continue
-        if upper in ("PRODUCT DESCRIPTION", "BRAND DESCRIPTION", "BRAND STORY"):
-            continue
-        if re.match(r"^(Module\s+\d+|\d+(st|nd|rd|th)\s+Feature|Comparison Chart|\(Module)", line, re.I):
-            continue
-        if any(bp in upper for bp in DESC_BOILERPLATE):
-            continue
-        if len(line) < 15:
-            continue
+        if any(marker in upper for marker in stop_markers):
+            break
         parts.append(line)
+
     return " ".join(parts).strip()
 
 
