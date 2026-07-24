@@ -2,7 +2,7 @@
 calc.py — Shared inventory math, used by the dashboard, overview, and digest
 pages so the formulas live in exactly one place (the original plugin had
 this logic duplicated across the AJAX handler, database class, and email
-digest — this consolidates it).
+digest — this consolidates).
 """
 
 import math
@@ -43,13 +43,14 @@ def _trend_calc(row) -> pd.Series:
     d90 = row["units_90day"] / 90 if row["units_90day"] > 0 else 0
     vs30 = (d7 - d30) / d30 if d30 > 0 else 0
     vs90 = (d7 - d90) / d90 if d90 > 0 else 0
+    vs30_pct, vs90_pct = round(vs30 * 100), round(vs90 * 100)
     if vs30 >= 0.40 and vs90 >= 0.25:
-        flag = "🔥 Hot"
+        flag = f"🔥 Hot {'+' if vs30_pct >= 0 else ''}{vs30_pct}%"
     elif vs30 >= 0.20 or vs90 >= 0.20:
-        flag = "📈 Rising"
+        flag = f"📈 Rising {'+' if vs30_pct >= 0 else ''}{vs30_pct}%"
     else:
         flag = ""
-    return pd.Series({"trend": flag, "trend_vs30": round(vs30 * 100), "trend_vs90": round(vs90 * 100)})
+    return pd.Series({"trend": flag, "trend_vs30": vs30_pct, "trend_vs90": vs90_pct})
 
 
 def _action_text(row) -> str:
@@ -67,8 +68,8 @@ def _action_text(row) -> str:
 
 _DERIVED_COLS = [
     "inbound_total", "current_doi", "units_needed", "order_units_calc", "order_cases_calc",
-    "days_until_order", "order_by", "order_status", "doi_flag", "aged_181_plus",
-    "ais_qty_total", "d7_avg", "trend", "trend_vs30", "trend_vs90", "action",
+    "days_until_order", "order_by", "order_status", "doi_flag", "doi_display", "doi_pct_of_target",
+    "aged_181_plus", "ais_qty_total", "d7_avg", "trend", "trend_vs30", "trend_vs90", "action",
 ]
 _PD_COLS = [
     "pd_multiplier", "pd_daily_avg", "pd_doi_event", "pd_units_needed",
@@ -107,6 +108,11 @@ def compute_derived(df: pd.DataFrame, target_doi: int, lead_time: int) -> pd.Dat
         lambda d: (date.today() + timedelta(days=int(d))).strftime("%b %d"))
     df["order_status"] = df["days_until_order"].apply(order_status_label)
     df["doi_flag"] = df["current_doi"].apply(lambda d: doi_flag(d, target_doi))
+    # Streamlit's editable grid can't color a cell's text based on its value — this combines
+    # the color-coded flag directly with the number so the "color coding" reads as one unit,
+    # since a separate flag column next to a plain number is the closest equivalent available.
+    df["doi_display"] = df["doi_flag"] + " " + df["current_doi"].astype(str) + "d"
+    df["doi_pct_of_target"] = (df["current_doi"] / target_doi * 100).clip(upper=200).round()
     df["aged_181_plus"] = df["inv_age_181_270"] + df["inv_age_271_365"] + df["inv_age_365_plus"]
     df["ais_qty_total"] = (df.get("qty_ais_181_210", 0) + df.get("qty_ais_211_240", 0)
                             + df.get("qty_ais_241_270", 0) + df.get("qty_ais_271_300", 0)
