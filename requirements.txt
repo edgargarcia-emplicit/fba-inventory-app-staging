@@ -4,3 +4,5 @@ google-api-python-client>=2.100
 google-auth>=2.20
 openpyxl>=3.1
 tzdata>=2024.1
+python-docx>=1.1
+requests>=2.31

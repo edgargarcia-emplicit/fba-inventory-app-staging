@@ -16,6 +16,11 @@ import health
 import sheets
 import store
 
+import amazon_scraper
+import diffing
+import docx_parser
+import xlsx_export_parser
+
 st.set_page_config(page_title="FBA Inventory Sync", page_icon="📦", layout="wide")
 
 
@@ -87,6 +92,156 @@ def goto(page_name, brand_code=None, prefill_sku=None):
             st.session_state["client_selector"] = match.iloc[0]["client_name"]
     if prefill_sku is not None:
         st.session_state["prefill_sku"] = prefill_sku
+
+
+# ================================================== FF Pro Sync / QA helpers
+_RESULT_COLORS = {
+    "pass": ("#f0fff4", "#276749", "#9ae6b4", "✅ Pass"),
+    "fail": ("#fff5f5", "#c53030", "#fc8181", "❌ Fail"),
+    "missing": ("#fffbeb", "#92400e", "#fcd34d", "⚠ Missing"),
+    "error": ("#fff5f5", "#9b2c2c", "#feb2b2", "⚠ Error"),
+}
+
+
+def _result_badge_html(result: str) -> str:
+    bg, color, border, label = _RESULT_COLORS.get(result, _RESULT_COLORS["missing"])
+    return (f'<span style="background:{bg};color:{color};border:1px solid {border};'
+            f'padding:2px 10px;border-radius:10px;font-size:11px;font-weight:600">{label}</span>')
+
+
+def _render_comparison_table(results: dict, filt: str, hide_parents: bool, search: str,
+                              left_label: str, right_label: str) -> str:
+    """Builds the same word-level-diff-highlighted comparison table as the WordPress
+    plugin's crossref/QA results — st.dataframe can't render inline HTML marks, so this
+    is a real HTML table via st.components.v1.html instead."""
+    rows_html = []
+    search_lc = (search or "").lower()
+
+    for asin, item in results.items():
+        skus = item.get("skus") or ([item["sku"]] if item.get("sku") else [])
+        sku_list = ", ".join(skus) if skus else (item.get("sku") or "—")
+
+        if search_lc:
+            searchable = f"{asin} {sku_list} {item.get('title', '')}".lower()
+            if search_lc not in searchable:
+                continue
+        if hide_parents and diffing.skus_are_all_parents(skus):
+            continue
+
+        fields = item.get("fields", [])
+        if filt != "all":
+            fields = [f for f in fields if f["result"] == filt]
+
+        is_missing_asin = not item.get("in_xlsx", True)
+        has_error = bool(item.get("error"))
+        if not fields and not is_missing_asin and not has_error:
+            continue
+
+        title_safe = str(item.get("title", "") or "")[:80]
+        rows_html.append(
+            f'<tr style="background:#fafafa"><td colspan="6" style="padding:10px 12px;font-weight:700">'
+            f'<a href="https://www.amazon.com/dp/{asin}" target="_blank" style="color:#0d6efd;text-decoration:none">{asin} ↗</a>'
+            f'<span style="color:#666;font-weight:400;font-size:12px;margin-left:10px">{title_safe}</span>'
+            + (f'<span style="margin-left:10px">{_result_badge_html("missing")}</span>' if is_missing_asin else "")
+            + (f'<span style="margin-left:10px">{_result_badge_html("error")} {item["error"]}</span>' if has_error else "")
+            + '</td></tr>'
+        )
+
+        for f in fields:
+            source = f.get("source", f.get("expected", ""))
+            target = f.get("uploaded", f.get("actual", ""))
+            if f["result"] == "fail" and target:
+                diff = diffing.build_diff_html(source or "", target)
+                left_html = diff["source_html"]
+                right_html = diff["target_html"]
+                sim_bar = (f'<div style="margin-top:4px"><span style="display:inline-block;width:60px;height:4px;'
+                           f'background:#eee;border-radius:2px;overflow:hidden;vertical-align:middle">'
+                           f'<span style="display:block;height:100%;width:{f["similarity"]}%;background:#e8404a"></span>'
+                           f'</span> <span style="font-size:11px;color:#888">{f["similarity"]}% match</span></div>')
+                right_html += sim_bar
+            else:
+                import html as _html
+                left_html = _html.escape(source or "—")
+                right_html = (f'<span style="color:#bbb;font-style:italic">Not found</span>' if not target
+                              else _html.escape(target))
+
+            row_bg = {"pass": "#fff", "fail": "#fff8f8", "missing": "#fffbeb", "error": "#fff5f5"}.get(f["result"], "#fff")
+            rows_html.append(
+                f'<tr style="background:{row_bg}">'
+                f'<td style="padding:8px 12px;color:#888;font-size:11px;vertical-align:top">{sku_list}</td>'
+                f'<td style="padding:8px 12px;color:#555;font-weight:500;vertical-align:top;font-size:12px">{f["label"]}</td>'
+                f'<td style="padding:8px 12px;vertical-align:top;font-size:13px;max-width:280px">{left_html}</td>'
+                f'<td style="padding:8px 12px;vertical-align:top;font-size:13px;max-width:280px">{right_html}</td>'
+                f'<td style="padding:8px 12px;vertical-align:top">{_result_badge_html(f["result"])}</td>'
+                f'</tr>'
+            )
+
+    if not rows_html:
+        body = '<tr><td colspan="6" style="padding:24px;text-align:center;color:#888">No results match the current filter.</td></tr>'
+    else:
+        body = "".join(rows_html)
+
+    return f"""
+    <div style="font-family:-apple-system,sans-serif;font-size:13px">
+    <table style="border-collapse:collapse;width:100%">
+      <thead><tr style="background:#f9fafb;border-bottom:2px solid #e5e7eb">
+        <th style="padding:8px 12px;text-align:left;font-size:11px;color:#666">SKU(s)</th>
+        <th style="padding:8px 12px;text-align:left;font-size:11px;color:#666">Field</th>
+        <th style="padding:8px 12px;text-align:left;font-size:11px;color:#666">{left_label}</th>
+        <th style="padding:8px 12px;text-align:left;font-size:11px;color:#666">{right_label}</th>
+        <th style="padding:8px 12px;text-align:left;font-size:11px;color:#666">Result</th>
+      </tr></thead>
+      <tbody>{body}</tbody>
+    </table>
+    </div>
+    """
+
+
+def _build_export_df(results: dict) -> pd.DataFrame:
+    rows = []
+    for asin, item in results.items():
+        skus = item.get("skus") or ([item["sku"]] if item.get("sku") else [])
+        sku_list = "; ".join(skus) if skus else ""
+        if item.get("error"):
+            rows.append({"ASIN": asin, "SKU(s)": sku_list, "Title": item.get("title", ""),
+                         "Field": "error", "Expected": "", "Actual": item["error"],
+                         "Result": "error", "Similarity %": 0})
+            continue
+        if not item.get("in_xlsx", True):
+            rows.append({"ASIN": asin, "SKU(s)": sku_list, "Title": item.get("title", ""),
+                         "Field": "ASIN", "Expected": asin, "Actual": "NOT IN XLSX",
+                         "Result": "missing", "Similarity %": 0})
+        for f in item.get("fields", []):
+            rows.append({"ASIN": asin, "SKU(s)": sku_list, "Title": item.get("title", ""),
+                         "Field": f["label"], "Expected": f.get("source", f.get("expected", "")),
+                         "Actual": f.get("uploaded", f.get("actual", "")),
+                         "Result": f["result"], "Similarity %": f["similarity"]})
+    return pd.DataFrame(rows)
+
+
+def _build_diff_export_df(results: dict, hide_parents: bool):
+    """Only failing ASINs; if any bullet fails, include all bullets (source-of-truth values)."""
+    rows = []
+    for asin, item in results.items():
+        skus = item.get("skus") or ([item["sku"]] if item.get("sku") else [])
+        if hide_parents and diffing.skus_are_all_parents(skus):
+            continue
+        fields = item.get("fields", [])
+        has_failure = any(f["result"] != "pass" for f in fields)
+        if not has_failure and item.get("in_xlsx", True):
+            continue
+        by_field = {f["field"]: f for f in fields}
+        title_failed = by_field.get("title", {}).get("result") != "pass" if "title" in by_field else False
+        any_bullet_fail = any(f["result"] != "pass" for f in fields if f["field"].startswith("bullet_"))
+        row = {"ASIN": asin, "Title": by_field["title"]["source"] if title_failed and "title" in by_field else ""}
+        for key in ("bullet_1", "bullet_2", "bullet_3", "bullet_4", "bullet_5"):
+            f = by_field.get(key)
+            row[key.replace("_", " ").title()] = f["source"] if (f and any_bullet_fail) else ""
+        for key, label in (("description", "Description"), ("keywords", "Keywords")):
+            f = by_field.get(key)
+            row[label] = f["source"] if (f and f["result"] != "pass") else ""
+        rows.append(row)
+    return pd.DataFrame(rows) if rows else None
 
 
 def render_dashboard_module():
@@ -240,9 +395,10 @@ def render_dashboard_module():
 
     edit_df = safe_view(table, display_cols)
     edit_df.insert(0, "🔎", [False] * len(table))
-    st.caption("Streamlit's table doesn't support grouped/multi-row column headers (checked directly — "
-               "no such option exists), so related columns are named with a shared prefix instead "
-               "(e.g. 'Inbound: Working', 'Sales: 7d Units') and kept next to each other.")
+    st.caption("Streamlit's table has no real merged/spanning header row (checked directly in its "
+               "source — no such feature exists), so the bold labels above are a best-effort "
+               "approximation built from st.columns(), not a true grouped header cell. It should stay "
+               "reasonably aligned, including if you reorder columns below, but isn't pixel-perfect.")
 
 
     editor_key = f"main_editor_{brand}_{mode}_{show_inactive}_{hash(search)}"
@@ -349,6 +505,43 @@ def render_dashboard_module():
             help="Projected DOI if the Mock Units quantity arrived today.", disabled=True, width=default_width),
         "Note": st.column_config.TextColumn(width=default_width),
     })
+    # ---- Best-effort grouped header strip ----
+    # Streamlit's table has no real merged/spanning header row (checked directly in its
+    # source — no such feature exists), so this fakes one: a row of st.columns() sized by
+    # how many grid columns each group spans, placed right above the table. Since every
+    # column below uses the same width preset, count-based proportions line up reasonably
+    # well — not pixel-perfect (no horizontal-scroll awareness, and very long/short window
+    # widths can drift it slightly), but close, and it recomputes if you reorder columns
+    # in "Customize grid layout" above.
+    GROUP_MAP = {
+        "🔎": "", "Alerts": "Status", "Aged": "Status",
+        "Flag": "DOI", "DOI": "DOI", "Mock Units": "What-If", "Future DOI": "What-If", "7d DOI": "DOI",
+        "Trend": "Trend", "vs 30d %": "Trend", "vs 90d %": "Trend",
+        "Title": "Item", "SKU": "Item", "ASIN": "Item",
+        "Fulfillable": "Inventory", "Fulf.+Inbound": "Inventory",
+        "Inbound: Working": "Inbound", "Inbound: Shipped": "Inbound", "Inbound: Receiving": "Inbound",
+        "Inbound: FC Transfer": "Inbound", "Inbound: FC Processing": "Inbound",
+        "Sales: 7d Units": "Sales", "Sales: 30d Units": "Sales", "Sales: 60d Units": "Sales",
+        "Sales: 90d Units": "Sales", "Daily Avg": "Sales", "% Mix": "Sales",
+        "Order By": "Replenishment", "Status": "Replenishment", "Action": "Replenishment",
+        "Order Units": "Replenishment", "Order Cases": "Replenishment",
+        "PD Mult.": "Prime Day", "PD Daily Avg": "Prime Day", "PD DOI (event)": "Prime Day",
+        "PD Order Units": "Prime Day", "PD Order Cases": "Prime Day", "PD Status": "Prime Day",
+        "Synced": "", "Note": "",
+    }
+    visible_order = column_order if column_order else list(edit_df.columns)
+    segments = []  # list of [group_label, column_count]
+    for col in visible_order:
+        label = GROUP_MAP.get(col, "")
+        if segments and segments[-1][0] == label:
+            segments[-1][1] += 1
+        else:
+            segments.append([label, 1])
+    header_cols = st.columns([count for _, count in segments])
+    for hc, (label, _count) in zip(header_cols, segments):
+        if label:
+            hc.markdown(f"**{label}**")
+
     result = st.data_editor(
         edit_df, use_container_width=True, hide_index=True, height=520, key=editor_key,
         column_order=column_order,
@@ -471,7 +664,8 @@ def render_dashboard_module():
 
 # =============================================================== sidebar
 clients = store.get_clients()
-PAGES = ["Overview", "Dashboard", "Health Report", "Shipments", "Digest Preview", "Clients"]
+PAGES = ["Overview", "Dashboard", "Health Report", "Shipments", "Digest Preview",
+         "FF Pro Sync", "QA", "Clients"]
 
 with st.sidebar:
     st.title("📦 FBA Inventory")
@@ -481,7 +675,7 @@ with st.sidebar:
     active = None
     if clients.empty:
         st.info("No clients yet — add one on the Clients page.")
-    elif page not in ("Overview", "Clients"):
+    elif page not in ("Overview", "Clients", "FF Pro Sync", "QA"):
         names = clients["client_name"].tolist()
         chosen = st.selectbox("Client", names, key="client_selector")
         active = clients[clients["client_name"] == chosen].iloc[0]
@@ -614,6 +808,286 @@ if page == "Clients":
             code = clients[clients["client_name"] == target].iloc[0]["brand_code"]
             store.delete_client(code)
             st.rerun()
+    st.stop()
+
+
+# =============================================================== FF PRO SYNC
+if page == "FF Pro Sync":
+    st.header("📋 FF Pro Sync")
+    st.caption("Upload one or more copy templates (.docx) and your Amazon listing export (.xlsx). "
+               "The DOCX is the source of truth — differences are highlighted per ASIN, per field.")
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("**📄 Copy template(s) (.docx) — source of truth**")
+        docx_uploads = st.file_uploader("DOCX files", type=["docx"], accept_multiple_files=True,
+                                         label_visibility="collapsed", key="cr_docx")
+    with c2:
+        st.markdown("**📊 Amazon listing export (.xlsx) — what's uploaded**")
+        xlsx_upload = st.file_uploader("XLSX file", type=["xlsx"], label_visibility="collapsed", key="cr_xlsx")
+
+    label = st.text_input("Label (optional)", placeholder="e.g. SIG Enclosure June 2026", key="cr_label")
+
+    title_mode = st.session_state.get("cr_title_mode")
+    if st.button("Run FF Pro Sync", type="primary", disabled=not (docx_uploads and xlsx_upload)):
+        with st.spinner("Parsing documents and comparing fields…"):
+            try:
+                docx_asins = {}
+                docx_names = []
+                needs_choice = False
+                for uf in docx_uploads:
+                    tmp_path = f"/tmp/{uf.name}"
+                    with open(tmp_path, "wb") as f:
+                        f.write(uf.getvalue())
+                    parsed = docx_parser.parse(tmp_path, title_mode or "auto")
+                    if parsed["needs_title_choice"]:
+                        needs_choice = True
+                        break
+                    docx_asins.update(parsed["asins"])
+                    docx_names.append(uf.name)
+
+                if needs_choice:
+                    st.session_state["cr_needs_choice"] = True
+                    st.session_state["cr_title_modes"] = parsed["title_modes"]
+                else:
+                    st.session_state["cr_needs_choice"] = False
+                    xlsx_tmp = f"/tmp/{xlsx_upload.name}"
+                    with open(xlsx_tmp, "wb") as f:
+                        f.write(xlsx_upload.getvalue())
+                    xlsx_data = xlsx_export_parser.parse(xlsx_tmp)
+
+                    results = {}
+                    fields_to_compare = {
+                        "title": "Title", "bullet_1": "Bullet 1", "bullet_2": "Bullet 2",
+                        "bullet_3": "Bullet 3", "bullet_4": "Bullet 4", "bullet_5": "Bullet 5",
+                        "description": "Description", "keywords": "Generic Keywords",
+                    }
+                    for asin, docx_row in docx_asins.items():
+                        xlsx_row = xlsx_data.get(asin, {})
+                        comparisons = []
+                        for field, flabel in fields_to_compare.items():
+                            source = (docx_row.get(field) or "").strip()
+                            if not source:
+                                continue
+                            uploaded = (xlsx_row.get(field) or "").strip()
+                            cmp = diffing.compare_field(source, uploaded)
+                            comparisons.append({"field": field, "label": flabel, "source": source,
+                                                 "uploaded": uploaded, **cmp})
+                        results[asin] = {
+                            "asin": asin, "sku": docx_row.get("sku", ""),
+                            "skus": xlsx_row.get("skus", []), "title": docx_row.get("title", asin),
+                            "in_xlsx": asin in xlsx_data, "fields": comparisons,
+                        }
+
+                    run_id = store.save_crossref_run(
+                        label or f"Run {date.today()}", docx_names, xlsx_upload.name, results, title_mode or "auto")
+                    st.session_state["cr_results"] = results
+                    st.session_state["cr_run_id"] = run_id
+                    st.session_state["cr_title_mode"] = None
+                    st.success(f"Compared {len(results)} ASIN(s).")
+            except Exception as e:  # noqa: BLE001
+                st.error(f"Sync failed: {e}")
+
+    if st.session_state.get("cr_needs_choice"):
+        st.warning("📋 The DOCX has both TEST and CURRENT titles — which should be used?")
+        cc1, cc2 = st.columns(2)
+        if cc1.button("Use TEST titles"):
+            st.session_state["cr_title_mode"] = "test"
+            st.rerun()
+        if cc2.button("Use CURRENT titles"):
+            st.session_state["cr_title_mode"] = "current"
+            st.rerun()
+
+    st.divider()
+    st.subheader("History")
+    cr_runs = store.get_crossref_runs()
+    if cr_runs.empty:
+        st.caption("No runs yet.")
+    else:
+        for _, run in cr_runs.head(20).iterrows():
+            rate = round(int(run["pass_count"]) / max(int(run["asin_count"]), 1) * 100)
+            rc1, rc2, rc3 = st.columns([4, 1, 1])
+            rc1.markdown(f"**{run['label']}** — {run['docx_files']} · {run['created_at']}")
+            rc2.markdown(f"{rate}% pass")
+            if rc3.button("Load", key=f"loadcr_{run['run_id']}"):
+                res_df = store.get_crossref_run_results(run["run_id"])
+                results = {}
+                for _, r in res_df.iterrows():
+                    a = r["asin"]
+                    if a not in results:
+                        import json as _json
+                        try:
+                            skus = _json.loads(r["skus"]) if r["skus"] else []
+                        except (ValueError, TypeError):
+                            skus = []
+                        results[a] = {"asin": a, "sku": "", "skus": skus, "title": r["title"],
+                                      "in_xlsx": True, "fields": []}
+                    if r["field"] == "asin_missing":
+                        results[a]["in_xlsx"] = False
+                    else:
+                        results[a]["fields"].append({
+                            "field": r["field"], "label": r["field"].replace("_", " ").title(),
+                            "source": r["source"], "uploaded": r["uploaded"],
+                            "result": r["result"], "similarity": int(float(r["similarity"] or 0)),
+                        })
+                st.session_state["cr_results"] = results
+                st.session_state["cr_run_id"] = run["run_id"]
+                st.rerun()
+
+    results = st.session_state.get("cr_results")
+    if results:
+        st.divider()
+        pass_n = sum(1 for r in results.values() if r.get("in_xlsx", True) and all(f["result"] == "pass" for f in r["fields"]))
+        fail_n = len(results) - pass_n
+        k1, k2, k3 = st.columns(3)
+        k1.metric("ASINs", len(results))
+        k2.metric("Passed", pass_n)
+        k3.metric("Failed", fail_n)
+
+        f1, f2, f3 = st.columns([1, 1, 2])
+        filt = f1.radio("Filter", ["all", "fail", "missing", "pass"], horizontal=True, key="cr_filter")
+        hide_parents = f2.toggle("Hide parent SKUs", key="cr_hide_parents")
+        search = f3.text_input("Search ASIN, SKU, or title", key="cr_search")
+
+        html_out = _render_comparison_table(results, filt, hide_parents, search, "DOCX (source of truth)", "XLSX (uploaded)")
+        st.components.v1.html(html_out, height=600, scrolling=True)
+
+        exp1, exp2 = st.columns(2)
+        export_df = _build_export_df(results)
+        exp1.download_button("⬇️ Export CSV", export_df.to_csv(index=False).encode("utf-8"),
+                              file_name=f"ff-pro-sync-{date.today()}.csv", mime="text/csv")
+        diff_df = _build_diff_export_df(results, hide_parents)
+        if diff_df is not None:
+            exp2.download_button("⬇️ Export Differences", diff_df.to_csv(index=False).encode("utf-8"),
+                                  file_name=f"ff-pro-sync-differences-{date.today()}.csv", mime="text/csv")
+    st.stop()
+
+
+# =============================================================== QA
+if page == "QA":
+    st.header("✅ Listing QA")
+    st.caption("Upload your Amazon listing export (or a copy template DOCX). Each ASIN is fetched live "
+               "from Amazon and compared field by field — anything that doesn't match is flagged.")
+
+    qa_upload = st.file_uploader("Expected content file (.xlsx or .docx)", type=["xlsx", "docx"], key="qa_file")
+    qa_label = st.text_input("Run label (optional)", placeholder="e.g. Earth Echo June upload", key="qa_label")
+    qa_title_mode = st.session_state.get("qa_title_mode")
+
+    if st.button("Run QA check", type="primary", disabled=not qa_upload):
+        with st.spinner("Parsing file and fetching live listings…"):
+            try:
+                tmp_path = f"/tmp/{qa_upload.name}"
+                with open(tmp_path, "wb") as f:
+                    f.write(qa_upload.getvalue())
+
+                if qa_upload.name.lower().endswith(".docx"):
+                    parsed = docx_parser.parse(tmp_path, qa_title_mode or "auto")
+                    if parsed["needs_title_choice"]:
+                        st.session_state["qa_needs_choice"] = True
+                        st.session_state["qa_title_modes"] = parsed["title_modes"]
+                        st.stop()
+                    st.session_state["qa_needs_choice"] = False
+                    expected_data = parsed["asins"]
+                else:
+                    expected_data = xlsx_export_parser.parse(tmp_path)
+
+                progress = st.progress(0.0, text="Fetching listings from Amazon…")
+                results = {}
+                asins = list(expected_data.items())
+                for i, (asin, expected) in enumerate(asins):
+                    progress.progress((i + 1) / len(asins), text=f"Fetching {asin} ({i + 1}/{len(asins)})…")
+                    try:
+                        scraped = amazon_scraper.fetch(asin, "US")
+                    except amazon_scraper.ScrapeError as e:
+                        results[asin] = {"asin": asin, "sku": expected.get("sku", ""),
+                                          "title": expected.get("title", ""), "error": str(e), "fields": []}
+                        continue
+
+                    fields_to_compare = {"title": "Title", "brand": "Brand", "bullet_1": "Bullet 1",
+                                          "bullet_2": "Bullet 2", "bullet_3": "Bullet 3",
+                                          "bullet_4": "Bullet 4", "bullet_5": "Bullet 5"}
+                    comparisons = []
+                    for field, flabel in fields_to_compare.items():
+                        source = (expected.get(field) or "").strip()
+                        if not source:
+                            continue
+                        actual = (scraped.get(field) or "").strip()
+                        cmp = diffing.compare_field(source, actual)
+                        comparisons.append({"field": field, "label": flabel, "expected": source,
+                                             "actual": actual, "source": source, "uploaded": actual, **cmp})
+                    results[asin] = {"asin": asin, "sku": expected.get("sku", ""),
+                                      "title": expected.get("title", asin), "fields": comparisons}
+                progress.empty()
+
+                run_id = store.save_qa_run(qa_label or f"Run {date.today()}", qa_upload.name, results)
+                st.session_state["qa_results"] = results
+                st.session_state["qa_run_id"] = run_id
+                st.session_state["qa_title_mode"] = None
+                st.success(f"Checked {len(results)} ASIN(s).")
+            except Exception as e:  # noqa: BLE001
+                st.error(f"QA run failed: {e}")
+
+    if st.session_state.get("qa_needs_choice"):
+        st.warning("📋 This document has both TEST and CURRENT titles — which should be used?")
+        qc1, qc2 = st.columns(2)
+        if qc1.button("Use TEST titles", key="qa_test_btn"):
+            st.session_state["qa_title_mode"] = "test"
+            st.rerun()
+        if qc2.button("Use CURRENT titles", key="qa_current_btn"):
+            st.session_state["qa_title_mode"] = "current"
+            st.rerun()
+
+    st.divider()
+    st.subheader("QA history")
+    qa_runs = store.get_qa_runs()
+    if qa_runs.empty:
+        st.caption("No runs yet.")
+    else:
+        for _, run in qa_runs.head(20).iterrows():
+            rate = round(int(run["pass_count"]) / max(int(run["asin_count"]), 1) * 100)
+            rc1, rc2, rc3 = st.columns([4, 1, 1])
+            rc1.markdown(f"**{run['label']}** — {run['file_name']} · {run['created_at']}")
+            rc2.markdown(f"{rate}% pass")
+            if rc3.button("Load", key=f"loadqa_{run['run_id']}"):
+                res_df = store.get_qa_run_results(run["run_id"])
+                results = {}
+                for _, r in res_df.iterrows():
+                    a = r["asin"]
+                    if a not in results:
+                        results[a] = {"asin": a, "sku": r["sku"], "title": r["title"], "fields": [], "error": ""}
+                    if r["field"] == "scrape_error":
+                        results[a]["error"] = r["error"]
+                    else:
+                        results[a]["fields"].append({
+                            "field": r["field"], "label": r["field"].replace("_", " ").title(),
+                            "expected": r["expected"], "actual": r["actual"], "source": r["expected"],
+                            "uploaded": r["actual"], "result": r["result"],
+                            "similarity": int(float(r["similarity"] or 0)),
+                        })
+                st.session_state["qa_results"] = results
+                st.session_state["qa_run_id"] = run["run_id"]
+                st.rerun()
+
+    qa_results = st.session_state.get("qa_results")
+    if qa_results:
+        st.divider()
+        pass_n = sum(1 for r in qa_results.values() if not r.get("error") and all(f["result"] == "pass" for f in r["fields"]))
+        fail_n = len(qa_results) - pass_n
+        k1, k2, k3 = st.columns(3)
+        k1.metric("ASINs", len(qa_results))
+        k2.metric("Passed", pass_n)
+        k3.metric("Failed", fail_n)
+
+        f1, f2 = st.columns([1, 2])
+        qa_filt = f1.radio("Filter", ["all", "fail", "missing", "pass"], horizontal=True, key="qa_filter")
+        qa_search = f2.text_input("Search ASIN or title", key="qa_search")
+
+        html_out = _render_comparison_table(qa_results, qa_filt, False, qa_search, "Expected (your file)", "Actual (live on Amazon)")
+        st.components.v1.html(html_out, height=600, scrolling=True)
+
+        export_df = _build_export_df(qa_results)
+        st.download_button("⬇️ Export CSV", export_df.to_csv(index=False).encode("utf-8"),
+                            file_name=f"qa-{date.today()}.csv", mime="text/csv")
     st.stop()
 
 

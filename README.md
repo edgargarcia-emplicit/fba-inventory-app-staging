@@ -10,10 +10,11 @@ which files need to be updated together when you deploy an update.
 ## What's included
 
 **Core dashboard — one consolidated, editable grid**
-- Every SKU's data lives on its own row: a combined color-flagged DOI display ("🟢 60d") plus a DOI-percent-of-target progress bar, health alerts, a trend flag with the actual 7d-vs-30d/7d-vs-90d percentage built into the text, title/SKU/ASIN, fulfillable + inbound, 7/30/60/90-day units sold, 7-day and blended daily averages, Order-By date, status, a plain-English recommended action, order units/cases, aged-inventory columns, % sales mix, and the sheet's sync date
+- Every SKU's data lives on its own row: a `🔎` checkbox that opens the SKU details popup, health/aged alert flags, a color-coded DOI flag (🟢/🟡/🔴) next to a combined DOI bar+number, a plain Trend flag with clearly-labeled `vs 30d %` / `vs 90d %` columns, title/SKU/ASIN, fulfillable, the five inbound breakdown columns (`Inbound: Working/Shipped/Receiving/FC Transfer/FC Processing`), fulfillable+inbound, `Sales: 7d/30d/60d/90d Units`, a 7-day-DOI projection, daily average, Order-By date, status, a plain-English recommended action, order units/cases, % sales mix, and the sheet's sync date. Related columns share a name prefix (`Inbound: `, `Sales: `) since Streamlit's table has no grouped/multi-row header feature to actually merge them visually
 - **Mock Units and Note are directly editable in the grid**, and **Future DOI recalculates live** right next to Mock Units on the same row. Click "💾 Save note changes" to persist edited notes (batched, not saved on every keystroke)
+- **A separate Aged Inventory table** at the bottom of the page with the full 91-180/181-270/271-365/365+/AIS breakdown, only for SKUs that have any
 - **"⚙️ Customize grid layout"** — set your preferred column order and width once; it persists across sessions (Streamlit can't capture a live column drag-resize/reorder, so this is the explicit alternative)
-- A **"🔎 View SKU details" popup** (a real modal, via `st.dialog`) shows that SKU's DOI history chart and a "log a shipment" quick action
+- **Check the `🔎` box on any row** to open a "SKU Deep-Dive" popup (a real modal, via `st.dialog`) with DOI history and daily-average-sold charts side by side, that SKU's dimensions and case packs, a form to add a new case pack, and a "log a shipment" quick action
 - Multi-client selector, hourly-cached sync + Sync Now button, per-client Target DOI / Lead Time settings
 - CSV export — with the formula-injection fix from the security review built in
 
@@ -29,6 +30,12 @@ which files need to be updated together when you deploy an update.
 **Digest**
 - **Digest Preview page** — rebuilds the exact branded HTML email from the WordPress version (order deadlines, replenishment, trending, aged inventory, shipments, full DOI snapshot) for every client combined
 - Download as `.html`, or send immediately via the "Send now" button once SMTP is configured (see below)
+
+**FF Pro Sync & QA** (ported from a separate WordPress plugin, "FBA Listing Monitor" — standalone pages, not tied to the client list)
+- **FF Pro Sync** — upload one or more copy-template `.docx` files (source of truth, ASIN in parens at the end of titles/bullets) plus your Amazon listing export `.xlsx`. Cross-checks title, bullet points 1–5, description, and generic keywords per ASIN, with word-level diff highlighting (red strikethrough = missing from the upload, yellow = extra/wrong) and a similarity % bar on anything that doesn't match. Filter by pass/fail/missing, hide parent SKUs, search, and export a CSV of everything or just the differences.
+- **QA** — upload the same kind of file and it fetches each ASIN's *live* Amazon listing and compares title/brand/bullets against it, with the same diff highlighting, filtering, and export.
+- Both keep a run history (persisted the same way as everything else, in the App Data sheet) so past comparisons can be reloaded later.
+- Honest limitation: live Amazon scraping is inherently fragile — Amazon can block, CAPTCHA, or change its page markup at any time. This is ported faithfully from what the original WordPress plugin did, not a more bulletproof approach.
 
 ## How it stores data (no database needed)
 

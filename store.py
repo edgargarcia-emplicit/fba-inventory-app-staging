@@ -48,6 +48,14 @@ TABS = {
     "ignored_alerts":     ["key"],
     "digest_recipients":  ["email"],
     "grid_prefs":         ["brand_code", "column_order_json", "width_preset"],
+    "crossref_runs":      ["run_id", "label", "docx_files", "xlsx_file", "asin_count",
+                            "pass_count", "fail_count", "title_mode", "created_at"],
+    "crossref_results":   ["run_id", "asin", "skus", "title", "field", "source", "uploaded",
+                            "result", "similarity", "in_xlsx"],
+    "qa_runs":            ["run_id", "label", "file_name", "asin_count", "pass_count",
+                            "fail_count", "created_at"],
+    "qa_results":         ["run_id", "asin", "sku", "title", "field", "expected", "actual",
+                            "result", "similarity", "error"],
 }
 
 
@@ -380,3 +388,105 @@ def save_grid_prefs(brand_code, column_order: list, width_preset: str):
     row = pd.DataFrame([{"brand_code": brand_code, "column_order_json": json.dumps(column_order),
                           "width_preset": width_preset}])
     _write_tab("grid_prefs", pd.concat([df, row], ignore_index=True))
+
+
+# ================================================================ FF Pro Sync
+def save_crossref_run(label, docx_files, xlsx_file, results: dict, title_mode="auto") -> str:
+    """Persist a full FF Pro Sync run (summary + per-field results). Returns the new run_id."""
+    import json
+    run_id = str(int(datetime.now().timestamp() * 1000))
+    pass_count = sum(1 for r in results.values() if all(f["result"] == "pass" for f in r["fields"]) and r.get("in_xlsx", True))
+    fail_count = len(results) - pass_count
+
+    runs = read_tab("crossref_runs")
+    new_run = pd.DataFrame([{
+        "run_id": run_id, "label": label, "docx_files": ", ".join(docx_files),
+        "xlsx_file": xlsx_file, "asin_count": len(results), "pass_count": pass_count,
+        "fail_count": fail_count, "title_mode": title_mode,
+        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+    }])
+    _write_tab("crossref_runs", pd.concat([runs, new_run], ignore_index=True))
+
+    rows = []
+    for asin, item in results.items():
+        skus_str = json.dumps(item.get("skus", []))
+        for f in item["fields"]:
+            rows.append({
+                "run_id": run_id, "asin": asin, "skus": skus_str, "title": item.get("title", ""),
+                "field": f["field"], "source": f["source"], "uploaded": f["uploaded"],
+                "result": f["result"], "similarity": f["similarity"], "in_xlsx": item.get("in_xlsx", True),
+            })
+        if not item.get("in_xlsx", True):
+            rows.append({"run_id": run_id, "asin": asin, "skus": skus_str, "title": item.get("title", ""),
+                         "field": "asin_missing", "source": asin, "uploaded": "",
+                         "result": "missing", "similarity": 0, "in_xlsx": False})
+    if rows:
+        _append_rows("crossref_results", rows)
+    return run_id
+
+
+def get_crossref_runs() -> pd.DataFrame:
+    df = read_tab("crossref_runs")
+    return df.sort_values("created_at", ascending=False) if not df.empty else df
+
+
+def get_crossref_run_results(run_id: str) -> pd.DataFrame:
+    df = read_tab("crossref_results")
+    return df[df["run_id"] == str(run_id)]
+
+
+def delete_crossref_run(run_id: str):
+    runs = read_tab("crossref_runs")
+    _write_tab("crossref_runs", runs[runs["run_id"] != str(run_id)])
+    results = read_tab("crossref_results")
+    _write_tab("crossref_results", results[results["run_id"] != str(run_id)])
+
+
+# ========================================================================= QA
+def save_qa_run(label, file_name, results: dict) -> str:
+    run_id = str(int(datetime.now().timestamp() * 1000))
+    pass_count = sum(1 for r in results.values() if not r.get("error") and all(f["result"] == "pass" for f in r["fields"]))
+    fail_count = len(results) - pass_count
+
+    runs = read_tab("qa_runs")
+    new_run = pd.DataFrame([{
+        "run_id": run_id, "label": label, "file_name": file_name, "asin_count": len(results),
+        "pass_count": pass_count, "fail_count": fail_count,
+        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+    }])
+    _write_tab("qa_runs", pd.concat([runs, new_run], ignore_index=True))
+
+    rows = []
+    for asin, item in results.items():
+        if item.get("error"):
+            rows.append({"run_id": run_id, "asin": asin, "sku": item.get("sku", ""),
+                         "title": item.get("title", ""), "field": "scrape_error",
+                         "expected": "", "actual": item["error"], "result": "error",
+                         "similarity": 0, "error": item["error"]})
+            continue
+        for f in item["fields"]:
+            rows.append({
+                "run_id": run_id, "asin": asin, "sku": item.get("sku", ""), "title": item.get("title", ""),
+                "field": f["field"], "expected": f["expected"], "actual": f["actual"],
+                "result": f["result"], "similarity": f["similarity"], "error": "",
+            })
+    if rows:
+        _append_rows("qa_results", rows)
+    return run_id
+
+
+def get_qa_runs() -> pd.DataFrame:
+    df = read_tab("qa_runs")
+    return df.sort_values("created_at", ascending=False) if not df.empty else df
+
+
+def get_qa_run_results(run_id: str) -> pd.DataFrame:
+    df = read_tab("qa_results")
+    return df[df["run_id"] == str(run_id)]
+
+
+def delete_qa_run(run_id: str):
+    runs = read_tab("qa_runs")
+    _write_tab("qa_runs", runs[runs["run_id"] != str(run_id)])
+    results = read_tab("qa_results")
+    _write_tab("qa_results", results[results["run_id"] != str(run_id)])
